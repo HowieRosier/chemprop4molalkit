@@ -1,5 +1,5 @@
 import logging
-from typing import Callable
+from typing import Callable, Optional
 
 from tensorboardX import SummaryWriter
 import torch
@@ -22,9 +22,10 @@ def train(model: MoleculeModel,
           args: TrainArgs,
           n_iter: int = 0,
           logger: logging.Logger = None,
-          writer: SummaryWriter = None) -> int:
+          writer: SummaryWriter = None,
+          cbp_trainer: Optional['ContinualBackpropTrainer'] = None) -> tuple[int, float]:
     """
-    Trains a model for an epoch.
+    Trains a model for an epoch, with optional Continual Backpropagation support.
 
     :param model: A :class:`~chemprop.models.model.MoleculeModel`.
     :param data_loader: A :class:`~chemprop.data.data.MoleculeDataLoader`.
@@ -35,12 +36,18 @@ def train(model: MoleculeModel,
     :param n_iter: The number of iterations (training examples) trained on so far.
     :param logger: A logger for recording output.
     :param writer: A tensorboardX SummaryWriter.
-    :return: The total number of iterations (training examples) trained on so far.
+    :param cbp_trainer: Optional :class:`~chemprop.train.cbp_trainer.ContinualBackpropTrainer` for CBP training.
+    :return: A tuple of (total iterations, average epoch loss).
     """
     debug = logger.debug if logger is not None else print
+    
+    # Check if we're using CBP mode
+    use_cbp = cbp_trainer is not None and hasattr(args, 'cbp') and args.cbp
 
     model.train()
     loss_sum = iter_count = 0
+    epoch_loss_sum = 0  # Track total loss for the epoch
+    epoch_batch_count = 0  # Track number of batches
 
     for batch in tqdm(data_loader, total=len(data_loader), leave=False):
         # Prepare batch
@@ -66,57 +73,87 @@ def train(model: MoleculeModel,
 
         # Run model
         model.zero_grad()
-        preds = model(mol_batch, features_batch, atom_descriptors_batch, atom_features_batch, bond_features_batch)
+        
+        if use_cbp:
+            # CBP training mode - use CBP trainer for advanced training
+            cbp_batch_data = {
+                'mol_batch': mol_batch,
+                'features_batch': features_batch,
+                'atom_descriptors_batch': atom_descriptors_batch,
+                'atom_features_batch': atom_features_batch,
+                'bond_features_batch': bond_features_batch
+            }
+            
+            # Use CBP trainer's advanced training step
+            loss = cbp_trainer.train_step_advanced(
+                batch_data=cbp_batch_data,
+                targets=targets,
+                mask=mask,
+                target_weights=target_weights,
+                data_weights=data_weights,
+                loss_func=loss_func,
+                args=args,
+                lt_targets=lt_target_batch if args.loss_function == 'bounded_mse' else None,
+                gt_targets=gt_target_batch if args.loss_function == 'bounded_mse' else None
+            )
+            
+        else:
+            # Standard training mode
+            preds = model(mol_batch, features_batch, atom_descriptors_batch, atom_features_batch, bond_features_batch)
 
-        # Move tensors to correct device
-        torch_device = preds.device
-        mask = mask.to(torch_device)
-        targets = targets.to(torch_device)
-        target_weights = target_weights.to(torch_device)
-        data_weights = data_weights.to(torch_device)
-        if args.loss_function == 'bounded_mse':
-            lt_target_batch = lt_target_batch.to(torch_device)
-            gt_target_batch = gt_target_batch.to(torch_device)
+            # Move tensors to correct device
+            torch_device = preds.device
+            mask = mask.to(torch_device)
+            targets = targets.to(torch_device)
+            target_weights = target_weights.to(torch_device)
+            data_weights = data_weights.to(torch_device)
+            if args.loss_function == 'bounded_mse':
+                lt_target_batch = lt_target_batch.to(torch_device)
+                gt_target_batch = gt_target_batch.to(torch_device)
 
-        # Calculate losses
-        if args.loss_function == 'mcc' and args.dataset_type == 'classification':
-            loss = loss_func(preds, targets, data_weights, mask) *target_weights.squeeze(0)
-        elif args.loss_function == 'mcc': # multiclass dataset type
-            targets = targets.long()
-            target_losses = []
-            for target_index in range(preds.size(1)):
-                target_loss = loss_func(preds[:, target_index, :], targets[:, target_index], data_weights, mask[:, target_index]).unsqueeze(0)
-                target_losses.append(target_loss)
-            loss = torch.cat(target_losses).to(torch_device) * target_weights.squeeze(0)
-        elif args.dataset_type == 'multiclass':
-            targets = targets.long()
-            if args.loss_function == 'dirichlet':
-                loss = loss_func(preds, targets, args.evidential_regularization) * target_weights * data_weights * mask
-            else:
+            # Calculate losses
+            if args.loss_function == 'mcc' and args.dataset_type == 'classification':
+                loss = loss_func(preds, targets, data_weights, mask) *target_weights.squeeze(0)
+            elif args.loss_function == 'mcc': # multiclass dataset type
+                targets = targets.long()
                 target_losses = []
                 for target_index in range(preds.size(1)):
-                    target_loss = loss_func(preds[:, target_index, :], targets[:, target_index]).unsqueeze(1)
+                    target_loss = loss_func(preds[:, target_index, :], targets[:, target_index], data_weights, mask[:, target_index]).unsqueeze(0)
                     target_losses.append(target_loss)
-                loss = torch.cat(target_losses, dim=1).to(torch_device) * target_weights * data_weights * mask
-        elif args.dataset_type == 'spectra':
-            loss = loss_func(preds, targets, mask) * target_weights * data_weights * mask
-        elif args.loss_function == 'bounded_mse':
-            loss = loss_func(preds, targets, lt_target_batch, gt_target_batch) * target_weights * data_weights * mask
-        elif args.loss_function == 'evidential':
-            loss = loss_func(preds, targets, args.evidential_regularization) * target_weights * data_weights * mask
-        elif args.loss_function == 'dirichlet': # classification
-            loss = loss_func(preds, targets, args.evidential_regularization) * target_weights * data_weights * mask
-        else:
-            loss = loss_func(preds, targets) * target_weights * data_weights * mask
-        loss = loss.sum() / mask.sum()
+                loss = torch.cat(target_losses).to(torch_device) * target_weights.squeeze(0)
+            elif args.dataset_type == 'multiclass':
+                targets = targets.long()
+                if args.loss_function == 'dirichlet':
+                    loss = loss_func(preds, targets, args.evidential_regularization) * target_weights * data_weights * mask
+                else:
+                    target_losses = []
+                    for target_index in range(preds.size(1)):
+                        target_loss = loss_func(preds[:, target_index, :], targets[:, target_index]).unsqueeze(1)
+                        target_losses.append(target_loss)
+                    loss = torch.cat(target_losses, dim=1).to(torch_device) * target_weights * data_weights * mask
+            elif args.dataset_type == 'spectra':
+                loss = loss_func(preds, targets, mask) * target_weights * data_weights * mask
+            elif args.loss_function == 'bounded_mse':
+                loss = loss_func(preds, targets, lt_target_batch, gt_target_batch) * target_weights * data_weights * mask
+            elif args.loss_function == 'evidential':
+                loss = loss_func(preds, targets, args.evidential_regularization) * target_weights * data_weights * mask
+            elif args.loss_function == 'dirichlet': # classification
+                loss = loss_func(preds, targets, args.evidential_regularization) * target_weights * data_weights * mask
+            else:
+                loss = loss_func(preds, targets) * target_weights * data_weights * mask
+            loss = loss.sum() / mask.sum()
 
-        loss_sum += loss.item()
+            loss.backward()
+            if args.grad_clip:
+                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+
+        # Record loss
+        loss_value = loss.item() if torch.is_tensor(loss) else loss
+        loss_sum += loss_value
         iter_count += 1
-
-        loss.backward()
-        if args.grad_clip:
-            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        optimizer.step()
+        epoch_loss_sum += loss_value
+        epoch_batch_count += 1
 
         if isinstance(scheduler, NoamLR):
             scheduler.step()
@@ -141,4 +178,36 @@ def train(model: MoleculeModel,
                 for i, lr in enumerate(lrs):
                     writer.add_scalar(f'learning_rate_{i}', lr, n_iter)
 
-    return n_iter
+    # Calculate average loss for the epoch
+    avg_epoch_loss = epoch_loss_sum / epoch_batch_count if epoch_batch_count > 0 else 0.0
+    
+    return n_iter, avg_epoch_loss
+
+
+# Create aliases for backward compatibility
+def train_cbp(model: MoleculeModel,
+              data_loader: MoleculeDataLoader,
+              loss_func: Callable,
+              optimizer: Optimizer,
+              scheduler: _LRScheduler,
+              args: TrainArgs,
+              cbp_trainer: 'ContinualBackpropTrainer',
+              n_iter: int = 0,
+              logger: logging.Logger = None,
+              writer: SummaryWriter = None) -> tuple[int, float]:
+    """
+    Backward compatibility wrapper for CBP training.
+    Now just calls the unified train function with cbp_trainer.
+    """
+    return train(
+        model=model,
+        data_loader=data_loader,
+        loss_func=loss_func,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        args=args,
+        n_iter=n_iter,
+        logger=logger,
+        writer=writer,
+        cbp_trainer=cbp_trainer
+    )

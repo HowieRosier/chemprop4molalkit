@@ -99,6 +99,7 @@ def cross_validate(args: TrainArgs,
 
     # Run training on different random seeds for each fold
     all_scores = defaultdict(list)
+    actual_save_dirs = []  # Track actual save directories for each fold
     for fold_num in range(args.num_folds):
         info(f'Fold {fold_num}')
         args.seed = init_seed + fold_num
@@ -115,6 +116,14 @@ def cross_validate(args: TrainArgs,
         # Otherwise, train the models
         else:
             model_scores = train_func(args, data, logger)
+            
+            # Extract actual save_dir if using structured directories
+            if '_save_dir' in model_scores:
+                actual_save_dir = model_scores['_save_dir']
+                del model_scores['_save_dir']  # Remove from scores
+                actual_save_dirs.append(actual_save_dir)
+            else:
+                actual_save_dirs.append(args.save_dir)
 
         for metric, scores in model_scores.items():
             all_scores[metric].append(scores)
@@ -159,41 +168,13 @@ def cross_validate(args: TrainArgs,
             and still return an overall average for the remaining folds or tasks. The behavior now \
             is to include them in the average, converting overall average metrics to 'nan' as well.")
 
-    # Save scores
-    with open(os.path.join(save_dir, TEST_SCORES_FILE_NAME), 'w') as f:
-        writer = csv.writer(f)
-
-        header = ['Task']
-        for metric in args.metrics:
-            header += [f'Mean {metric}', f'Standard deviation {metric}'] + \
-                      [f'Fold {i} {metric}' for i in range(args.num_folds)]
-        writer.writerow(header)
-
-        if args.dataset_type == 'spectra': # spectra data type has only one score to report
-            row = ['spectra']
-            for metric, scores in all_scores.items():
-                task_scores = scores[:,0]
-                mean, std = np.mean(task_scores), np.std(task_scores)
-                row += [mean, std] + task_scores.tolist()
-            writer.writerow(row)
-        else: # all other data types, separate scores by task
-            for task_num, task_name in enumerate(args.task_names):
-                row = [task_name]
-                for metric, scores in all_scores.items():
-                    task_scores = scores[:, task_num]
-                    mean, std = np.mean(task_scores), np.std(task_scores)
-                    row += [mean, std] + task_scores.tolist()
-                writer.writerow(row)
+    # Skip writing fold-level CSV summary (test_scores.csv) to keep outputs minimal.
 
     # Determine mean and std score of main metric
     avg_scores = multitask_mean(all_scores[args.metric], metric=args.metric, axis=1)
     mean_score, std_score = np.mean(avg_scores), np.std(avg_scores)
 
-    # Optionally merge and save test preds
-    if args.save_preds:
-        all_preds = pd.concat([pd.read_csv(os.path.join(save_dir, f'fold_{fold_num}', 'test_preds.csv'))
-                               for fold_num in range(args.num_folds)])
-        all_preds.to_csv(os.path.join(save_dir, 'test_preds.csv'), index=False)
+    # Skip writing fold-level merged test_preds.csv; per-model predictions already exist.
 
     return mean_score, std_score
 
@@ -203,4 +184,8 @@ def chemprop_train() -> None:
 
     This is the entry point for the command line command :code:`chemprop_train`.
     """
-    cross_validate(args=TrainArgs().parse_args(), train_func=run_training)
+    args = TrainArgs().parse_args()
+    
+    # Use unified run_training function that handles both standard and CBP modes
+    from .run_training import run_training
+    cross_validate(args=args, train_func=run_training)

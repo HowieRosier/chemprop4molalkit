@@ -7,10 +7,10 @@ with open('README.md', encoding='utf-8') as f:
     long_description = f.read()
 
 setup(
-    name='chemprop',
-    author='Kyle Swanson, Kevin Yang, Wengong Jin, Lior Hirschfeld, Allison Tam',
+    name='chemprop4molalkit',
+    author='Kyle Swanson, Kevin Yang, Wengong Jin, Lior Hirschfeld, Allison Tam (Modified for MolALKit integration)',
     author_email='chemprop@mit.edu',
-    description='Molecular Property Prediction with Message Passing Neural Networks',
+    description='Molecular Property Prediction with Message Passing Neural Networks - Enhanced with CBP for MolALKit integration',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='https://github.com/chemprop/chemprop',

@@ -11,6 +11,49 @@ from chemprop.features import BatchMolGraph
 from chemprop.nn_utils import get_activation_function, initialize_weights
 
 
+class FFNNetworkCBP(nn.Module):
+    """A feed-forward neural network that tracks intermediate activations for CBP."""
+    
+    def __init__(self, layers: nn.Sequential):
+        super(FFNNetworkCBP, self).__init__()
+        self.layers = layers
+        
+    def predict(self, x: torch.Tensor):
+        """
+        Forward pass that returns both output and intermediate features.
+        
+        :param x: Input tensor
+        :return: Output and list of intermediate activations
+        """
+        features = []
+        h = x
+        
+        # Process through layers and collect activations
+        i = 0
+        while i < len(self.layers):
+            layer = self.layers[i]
+            
+            if isinstance(layer, nn.Linear):
+                h = layer(h)
+                # Check if next layer is activation
+                if i + 1 < len(self.layers):
+                    next_layer = self.layers[i + 1]
+                    if isinstance(next_layer, (nn.ReLU, nn.ELU, nn.SELU, nn.Tanh, nn.LeakyReLU, nn.PReLU)):
+                        i += 1  # Skip to activation
+                        h = next_layer(h)
+                        features.append(h)
+            else:
+                h = layer(h)
+            
+            i += 1
+        
+        return h, features
+    
+    def forward(self, x: torch.Tensor):
+        """Standard forward pass."""
+        return self.layers(x)
+
+
 class MoleculeModel(nn.Module):
     """A :class:`MoleculeModel` is a model which contains a message passing network following by feed-forward layers."""
 
@@ -23,6 +66,9 @@ class MoleculeModel(nn.Module):
         self.classification = args.dataset_type == 'classification'
         self.multiclass = args.dataset_type == 'multiclass'
         self.loss_function = args.loss_function
+
+        # Store CBP flag
+        self.use_cbp = hasattr(args, 'cbp') and args.cbp
 
         if hasattr(args, 'train_class_sizes'):
             self.train_class_sizes = args.train_class_sizes
@@ -136,13 +182,86 @@ class MoleculeModel(nn.Module):
                 spectra_activation = nn_exp()
             ffn.append(spectra_activation)
 
-        # Create FFN model
-        self.ffn = nn.Sequential(*ffn)
+        # Create FFN model - use CBP wrapper if CBP is enabled
+        sequential = nn.Sequential(*ffn)
+        if self.use_cbp:
+            self.ffn = FFNNetworkCBP(sequential)
+        else:
+            self.ffn = sequential
 
         if args.checkpoint_frzn is not None:
             if args.frzn_ffn_layers > 0:
-                for param in list(self.ffn.parameters())[0:2 * args.frzn_ffn_layers]:  # Freeze weights and bias for given number of layers
+                # Access parameters correctly for both CBP and standard models
+                if self.use_cbp:
+                    params_to_freeze = list(self.ffn.layers.parameters())[0:2 * args.frzn_ffn_layers]
+                else:
+                    params_to_freeze = list(self.ffn.parameters())[0:2 * args.frzn_ffn_layers]
+                for param in params_to_freeze:
                     param.requires_grad = False
+
+    def predict(self, batch_data):
+        """
+        Forward pass that returns both output and intermediate features for CBP.
+        Only used when CBP is enabled.
+        
+        :param batch_data: Tuple of input batch components or single batch input
+        :return: Output predictions and intermediate features
+        """
+        if not self.use_cbp:
+            raise RuntimeError("predict() method should only be called when CBP is enabled")
+            
+        # Handle different input formats
+        if isinstance(batch_data, tuple):
+            if len(batch_data) == 2:
+                mol_batch, features_batch = batch_data
+                atom_descriptors_batch = atom_features_batch = bond_features_batch = None
+            else:
+                # Handle extended format with additional descriptors
+                mol_batch = batch_data[0]
+                features_batch = batch_data[1] if len(batch_data) > 1 else None
+                atom_descriptors_batch = batch_data[2] if len(batch_data) > 2 else None
+                atom_features_batch = batch_data[3] if len(batch_data) > 3 else None
+                bond_features_batch = batch_data[4] if len(batch_data) > 4 else None
+        else:
+            mol_batch = batch_data
+            features_batch = atom_descriptors_batch = atom_features_batch = bond_features_batch = None
+        
+        # Encode molecules
+        encodings = self.encoder(mol_batch, features_batch, atom_descriptors_batch,
+                                atom_features_batch, bond_features_batch)
+        
+        # Pass through FFN and get features
+        if hasattr(self.ffn, 'predict'):
+            output, features = self.ffn.predict(encodings)
+        else:
+            # Fallback for standard FFN (shouldn't happen in CBP mode)
+            output = self.ffn(encodings)
+            features = []
+        
+        # Apply output transformations
+        if self.classification and not (self.training and self.no_training_normalization) and self.loss_function != 'dirichlet':
+            output = self.sigmoid(output)
+        
+        if self.multiclass:
+            output = output.reshape((output.shape[0], -1, self.num_classes))
+            if not (self.training and self.no_training_normalization) and self.loss_function != 'dirichlet':
+                output = self.multiclass_softmax(output)
+        
+        # Handle special loss functions
+        if self.loss_function == 'mve':
+            means, variances = torch.split(output, output.shape[1] // 2, dim=1)
+            variances = self.softplus(variances)
+            output = torch.cat([means, variances], axis=1)
+        elif self.loss_function == 'evidential':
+            means, lambdas, alphas, betas = torch.split(output, output.shape[1] // 4, dim=1)
+            lambdas = self.softplus(lambdas)
+            alphas = self.softplus(alphas) + 1
+            betas = self.softplus(betas)
+            output = torch.cat([means, lambdas, alphas, betas], dim=1)
+        elif self.loss_function == 'dirichlet':
+            output = nn.functional.softplus(output) + 1
+        
+        return output, features
 
     def fingerprint(self,
                     batch: Union[List[List[str]], List[List[Chem.Mol]], List[List[Tuple[Chem.Mol, Chem.Mol]]], List[BatchMolGraph]],
@@ -160,6 +279,8 @@ class MoleculeModel(nn.Module):
                       the inner list is of length :code:`number_of_molecules` (number of molecules per datapoint).
         :param features_batch: A list of numpy arrays containing additional features.
         :param atom_descriptors_batch: A list of numpy arrays containing additional atom descriptors.
+        :param atom_features_batch: A list of numpy arrays containing additional atom features.
+        :param bond_features_batch: A list of numpy arrays containing additional bond features.
         :param fingerprint_type: The choice of which type of latent representation to return as the molecular fingerprint. Currently
                                  supported MPN for the output of the MPNN portion of the model or last_FFN for the input to the final readout layer.
         :return: The latent fingerprint vectors.
@@ -168,8 +289,14 @@ class MoleculeModel(nn.Module):
             return self.encoder(batch, features_batch, atom_descriptors_batch,
                                 atom_features_batch, bond_features_batch)
         elif fingerprint_type == 'last_FFN':
-            return self.ffn[:-1](self.encoder(batch, features_batch, atom_descriptors_batch,
-                                              atom_features_batch, bond_features_batch))
+            encodings = self.encoder(batch, features_batch, atom_descriptors_batch,
+                                   atom_features_batch, bond_features_batch)
+            if self.use_cbp:
+                # For CBP model, access the Sequential inside FFNNetworkCBP
+                return self.ffn.layers[:-1](encodings)
+            else:
+                # For standard model, ffn is already Sequential
+                return self.ffn[:-1](encodings)
         else:
             raise ValueError(f'Unsupported fingerprint type {fingerprint_type}.')
 
@@ -218,3 +345,7 @@ class MoleculeModel(nn.Module):
             output = nn.functional.softplus(output) + 1
 
         return output
+
+
+# Create an alias for backward compatibility
+MoleculeModelCBP = MoleculeModel

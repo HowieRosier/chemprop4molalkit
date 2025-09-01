@@ -281,6 +281,8 @@ class TrainArgs(CommonArgs):
     """Additional metrics to use to evaluate the model. Not used for early stopping."""
     save_dir: str = None
     """Directory where model checkpoints will be saved."""
+    no_structured_dir: bool = False
+    """If true, disable automatic structured directory creation (for backward compatibility)."""
     checkpoint_frzn: str = None
     """Path to model checkpoint file to be loaded for overwriting and freezing weights."""
     save_smiles_splits: bool = False
@@ -420,6 +422,23 @@ class TrainArgs(CommonArgs):
     """Maximum magnitude of gradient during training."""
     class_balance: bool = False
     """Trains with an equal number of positives and negatives in each batch."""
+    
+    # Continual Backpropagation (CBP) arguments
+    cbp: bool = False
+    """Activate Continual Backpropagation for neural network plasticity."""
+    replacement_rate: float = 1e-4
+    """Replacement rate for Generate-and-Test (GnT) in CBP."""
+    decay_rate: float = 0.99
+    """Decay rate for utility tracking in GnT."""
+    maturity_threshold: int = 20
+    """Maturity threshold for a neuron to be eligible for replacement."""
+    util_type: str = 'contribution'
+    """Utility type for neuron importance calculation (e.g., 'contribution', 'weight')."""
+    cbp_init: str = 'kaiming'
+    """Weight initialization method for new features in CBP."""
+    optimizer: str = 'adam'
+    """Optimizer to use (adam or sgd)."""
+    
     spectra_activation: Literal['exp', 'softplus'] = 'exp'
     """Indicates which function to use in dataset_type spectra training to constrain outputs to be positive."""
     spectra_target_floor: float = 1e-8
@@ -564,10 +583,9 @@ class TrainArgs(CommonArgs):
         if self.reaction is True and self.reaction_solvent is True:
             raise ValueError('Only reaction or reaction_solvent mode can be used, not both.')
         
-        # Create temporary directory as save directory if not provided
+        # Set default persistent save directory if not provided
         if self.save_dir is None:
-            temp_save_dir = TemporaryDirectory()
-            self.save_dir = temp_save_dir.name
+            self.save_dir = os.path.join(os.getcwd(), 'results')
 
         # Fix ensemble size if loading checkpoints
         if self.checkpoint_paths is not None and len(self.checkpoint_paths) > 0:

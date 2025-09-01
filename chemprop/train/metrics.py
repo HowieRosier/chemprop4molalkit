@@ -5,8 +5,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 
-from sklearn.metrics import auc, mean_absolute_error, mean_squared_error, root_mean_squared_error,\
-    precision_recall_curve, r2_score,\
+from sklearn.metrics import auc, mean_absolute_error, mean_squared_error, precision_recall_curve, r2_score,\
     roc_auc_score, accuracy_score, log_loss, f1_score, matthews_corrcoef
 
 
@@ -117,7 +116,12 @@ def rmse(targets: List[float], preds: List[float]) -> float:
     :param preds: A list of predictions.
     :return: The computed rmse.
     """
-    return root_mean_squared_error(targets, preds)
+    try:
+        # Try to use squared parameter (scikit-learn >= 1.0.0)
+        return mean_squared_error(targets, preds, squared=False)
+    except TypeError:
+        # Fallback for older scikit-learn versions
+        return np.sqrt(mean_squared_error(targets, preds))
 
 
 def bounded_rmse(targets: List[float], preds: List[float], gt_targets: List[bool] = None, lt_targets: List[bool] = None) -> float:
@@ -142,7 +146,12 @@ def bounded_rmse(targets: List[float], preds: List[float], gt_targets: List[bool
         targets,
         preds,
     )
-    return mean_squared_error(targets, preds, squared=False)
+    try:
+        # Try to use squared parameter (scikit-learn >= 1.0.0)
+        return mean_squared_error(targets, preds, squared=False)
+    except TypeError:
+        # Fallback for older scikit-learn versions
+        return np.sqrt(mean_squared_error(targets, preds))
 
 
 def bounded_mse(targets: List[float], preds: List[float], gt_targets: List[bool] = None, lt_targets: List[bool] = None) -> float:
@@ -167,7 +176,12 @@ def bounded_mse(targets: List[float], preds: List[float], gt_targets: List[bool]
         targets,
         preds,
     )
-    return mean_squared_error(targets, preds, squared=True)
+    try:
+        # Try to use squared parameter (scikit-learn >= 1.0.0)
+        return mean_squared_error(targets, preds, squared=True)
+    except TypeError:
+        # Fallback for older scikit-learn versions
+        return mean_squared_error(targets, preds)
 
 
 def bounded_mae(targets: List[float], preds: List[float], gt_targets: List[bool] = None, lt_targets: List[bool] = None) -> float:

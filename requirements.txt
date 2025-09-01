@@ -1,0 +1,118 @@
+# Chemprop Environment Requirements
+# Python 3.12.11
+# Created from conda environment: chemprop_py312_new
+# Date: 2025-08-26
+# Updated: 2025-08-26 - Added missing dependencies and corrected versions
+
+# Core ML and Scientific Computing
+torch==2.2.0
+numpy==1.26.4
+scipy==1.16.1
+scikit-learn==1.3.2
+pandas==2.3.2
+
+# Chemprop and Molecular Modeling
+chemprop==1.5.2
+rdkit==2025.3.5
+tensorboardX==2.6.4
+hyperopt==0.2.7
+
+# Deep Learning and Neural Networks
+typed-argument-parser==1.10.1
+typing-inspect==0.9.0
+typing_extensions==4.15.0
+
+# Data Processing and Utilities
+tqdm==4.67.1
+joblib==1.5.1
+threadpoolctl==3.6.0
+filelock==3.19.1
+
+# Visualization and Plotting
+matplotlib==3.10.5
+pillow==11.3.0
+contourpy==1.3.3
+cycler==0.12.1
+kiwisolver==1.4.9
+pyparsing==3.2.3
+
+# Web Framework (for chemprop web interface)
+Flask==3.1.2
+Werkzeug==3.1.3
+Jinja2==3.1.6
+MarkupSafe==3.0.2
+blinker==1.9.0
+click==8.2.1
+itsdangerous==2.2.0
+
+# Documentation and Development
+Sphinx==8.2.3
+sphinxcontrib-applehelp==2.0.0
+sphinxcontrib-devhelp==2.0.0
+sphinxcontrib-htmlhelp==2.1.0
+sphinxcontrib-jsmath==1.0.1
+sphinxcontrib-qthelp==2.0.0
+sphinxcontrib-serializinghtml==2.0.0
+docutils==0.21.2
+Pygments==2.19.2
+snowballstemmer==3.0.1
+alabaster==1.0.0
+babel==2.17.0
+imagesize==1.4.1
+roman-numerals-py==3.1.0
+
+# Data Formats and Serialization
+protobuf==6.32.0
+xarray==2025.8.0
+pandas_flavor==0.7.0
+python-dateutil==2.9.0.post0
+pytz==2025.2
+tzdata==2025.2
+
+# Network and HTTP
+requests==2.32.5
+urllib3==2.5.0
+idna==3.10
+charset-normalizer==3.4.3
+certifi==2025.8.3
+chardet==5.2.0
+
+# Parallel Processing and Optimization
+cloudpickle==3.1.1
+future==1.0.0
+py4j==0.10.9.9
+
+# Mathematical and Scientific
+sympy==1.14.0
+mpmath==1.3.0
+networkx==3.5
+munkres==1.1.4
+
+# System and Platform
+psutil==7.0.0
+greenlet==3.2.4
+pycairo==1.28.0
+rlPyCairo==0.2.0
+reportlab==4.4.1
+SQLAlchemy==2.0.43
+unicodedata2==16.0.0
+
+# Development Tools
+setuptools==78.1.1
+wheel==0.45.1
+pip==25.1
+
+# Font and Graphics
+fonttools==4.59.1
+freetype-py==2.3.0
+
+# Additional Utilities
+fsspec==2025.7.0
+docstring_parser==0.17.0
+mypy_extensions==1.1.0
+packaging==25.0
+six==1.17.0
+
+# CBP Integration Dependencies
+# These packages are essential for Continual Backpropagation functionality
+# No additional packages required - CBP is fully integrated into the core codebase

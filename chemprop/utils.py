@@ -114,7 +114,7 @@ def load_checkpoint(
     if device is not None:
         args.device = device
 
-    # Build model
+    # Build model - MoleculeModel now handles both CBP and standard modes internally
     model = MoleculeModel(args)
     model_state_dict = model.state_dict()
 
@@ -125,6 +125,27 @@ def load_checkpoint(
         if re.match(r"(encoder\.encoder\.)([Wc])", loaded_param_name) and not args.reaction_solvent:
             param_name = loaded_param_name.replace(
                 "encoder.encoder", "encoder.encoder.0")
+        # Handle FFN parameter naming compatibility between original and CBP models
+        elif loaded_param_name.startswith("ffn."):
+            # Check if current model uses CBP format (has ffn.layers) or standard format
+            has_cbp_format = any("ffn.layers." in str(key) for key in model_state_dict.keys())
+            
+            if loaded_param_name.startswith("ffn.layers."):
+                # Loaded checkpoint has CBP format
+                if has_cbp_format:
+                    # Current model also uses CBP format, keep as is
+                    param_name = loaded_param_name
+                else:
+                    # Current model uses standard format, convert from CBP to standard
+                    param_name = loaded_param_name.replace("ffn.layers.", "ffn.")
+            else:
+                # Loaded checkpoint has standard format
+                if has_cbp_format:
+                    # Current model uses CBP format, convert from standard to CBP
+                    param_name = loaded_param_name.replace("ffn.", "ffn.layers.")
+                else:
+                    # Current model also uses standard format, keep as is
+                    param_name = loaded_param_name
         else:
             param_name = loaded_param_name
 
@@ -208,7 +229,7 @@ def load_frzn_model(
     debug = logger.debug if logger is not None else print
 
     loaded_mpnn_model = torch.load(
-        path, map_location=lambda storage, loc: storage)
+        path, map_location=lambda storage, loc: storage, weights_only=False)
     loaded_state_dict = loaded_mpnn_model["state_dict"]
     loaded_args = loaded_mpnn_model["args"]
 
@@ -379,7 +400,7 @@ def load_mpn_model(model: MoleculeModel,
                    path: str, current_args: Namespace = None,
                    logger: logging.Logger = None,) -> MoleculeModel:
     loaded_state_dict = torch.load(
-        path, map_location=lambda storage, loc: storage)
+        path, map_location=lambda storage, loc: storage, weights_only=False)
     model_state_dict = model.encoder.state_dict()
 
     for i in range(current_args.number_of_molecules):
@@ -403,7 +424,7 @@ def load_scalers(
     :return: A tuple with the data :class:`~chemprop.data.scaler.StandardScaler`
              and features :class:`~chemprop.data.scaler.StandardScaler`.
     """
-    state = torch.load(path, map_location=lambda storage, loc: storage)
+    state = torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)
 
     if state["data_scaler"] is not None:
         scaler = StandardScaler(
@@ -449,7 +470,7 @@ def load_args(path: str) -> TrainArgs:
     args = TrainArgs()
     args.from_dict(
         vars(torch.load(path, map_location=lambda storage,
-             loc: storage)["args"]),
+             loc: storage, weights_only=False)["args"]),
         skip_unsettable=True,
     )
 
