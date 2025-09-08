@@ -15,7 +15,7 @@ from .evaluate import evaluate, evaluate_predictions
 from .predict import predict
 from .train import train
 from .loss_functions import get_loss_func
-from .cbp_trainer import ContinualBackpropTrainer
+from chemprop.models.cbp_trainer import ContinualBackpropTrainer
 from chemprop.spectra_utils import normalize_spectra, load_phase_mask
 from chemprop.args import TrainArgs
 from chemprop.constants import MODEL_FILE_NAME

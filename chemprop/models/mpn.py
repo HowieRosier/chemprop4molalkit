@@ -9,6 +9,7 @@ import torch.nn as nn
 from chemprop.args import TrainArgs
 from chemprop.features import BatchMolGraph, get_atom_fdim, get_bond_fdim, mol2graph
 from chemprop.nn_utils import index_select_ND, get_activation_function
+from chemprop.models.cbp_linear import CBPLinear
 
 
 class MPNEncoder(nn.Module):
@@ -64,6 +65,32 @@ class MPNEncoder(nn.Module):
 
         self.W_o = nn.Linear(self.atom_fdim + self.hidden_size, self.hidden_size)
 
+        # Continual Backpropagation (optional): add CBPLinear modules between key transforms
+        self.cbp_enabled = getattr(args, 'cbp', False)
+        if self.cbp_enabled:
+            # CBPLogger will be set later by the model when available
+            self.cbp_layer1 = CBPLinear(
+                in_layer=self.W_i,
+                out_layer=self.W_h,
+                replacement_rate=getattr(args, 'replacement_rate', 1e-4),
+                maturity_threshold=getattr(args, 'maturity_threshold', 100),
+                init=getattr(args, 'cbp_init', 'kaiming'),
+                act_type=getattr(args, 'activation', 'ReLU').lower(),
+                decay_rate=getattr(args, 'decay_rate', 0.99),
+                cbp_logger=None,  # Will be set by MoleculeModel if CBP logging is enabled
+            )
+            self.cbp_layer2 = CBPLinear(
+                in_layer=self.W_h,
+                out_layer=self.W_o,
+                add_in_dim=self.atom_fdim,
+                replacement_rate=getattr(args, 'replacement_rate', 1e-4),
+                maturity_threshold=getattr(args, 'maturity_threshold', 100),
+                init=getattr(args, 'cbp_init', 'kaiming'),
+                act_type=getattr(args, 'activation', 'ReLU').lower(),
+                decay_rate=getattr(args, 'decay_rate', 0.99),
+                cbp_logger=None,  # Will be set by MoleculeModel if CBP logging is enabled
+            )
+
         # layer after concatenating the descriptors if args.atom_descriptors == descriptors
         if args.atom_descriptors == 'descriptor':
             self.atom_descriptors_size = args.atom_descriptors_size
@@ -116,6 +143,8 @@ class MPNEncoder(nn.Module):
                 rev_message = message[b2revb]  # num_bonds x hidden
                 message = a_message[b2a] - rev_message  # num_bonds x hidden
 
+            if self.cbp_enabled and depth == 0:
+                message = self.cbp_layer1(message)
             message = self.W_h(message)
             message = self.act_func(input + message)  # num_bonds x hidden_size
             if self.bn is not None:
@@ -128,6 +157,8 @@ class MPNEncoder(nn.Module):
         nei_a_message = index_select_ND(message, a2x)  # num_atoms x max_num_bonds x hidden
         a_message = nei_a_message.sum(dim=1)  # num_atoms x hidden
         a_input = torch.cat([f_atoms, a_message], dim=1)  # num_atoms x (atom_fdim + hidden)
+        if self.cbp_enabled:
+            a_input = self.cbp_layer2(a_input)
         atom_hiddens = self.act_func(self.W_o(a_input))  # num_atoms x hidden
         atom_hiddens = self.dropout_layer(atom_hiddens)  # num_atoms x hidden
 

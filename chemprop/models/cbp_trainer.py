@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 import logging
 
-from chemprop.models import MoleculeModel  # MoleculeModel now handles CBP internally
+from chemprop.models.model import MoleculeModel  # MoleculeModel now handles CBP internally
 from chemprop.args import TrainArgs
 
 
@@ -142,15 +142,21 @@ class CBPLogger:
             f.write(f"CBP Training Log - Started at {datetime.now()}\n")
             f.write("="*80 + "\n")
     
-    def log_batch_stats(self, batch_id: int, stats: Dict):
-        """Log batch-level CBP statistics, including replaced neuron indices"""
+    def log_batch_stats(self, batch_id: int, stats: Dict, layer_type: str = "FFN"):
+        """
+        Log batch-level CBP statistics, including replaced neuron indices
+        
+        :param batch_id: Batch number
+        :param stats: Dictionary containing CBP statistics
+        :param layer_type: Type of layer ("FFN" or "MPN")
+        """
         timestamp = datetime.now().strftime("%H:%M:%S")
         
         # Write to log file
         with open(self.log_file, 'a') as f:
             total_replaced = stats.get('total_neurons_replaced', 0)
             if total_replaced > 0:
-                f.write(f"Batch {batch_id:4d} ({timestamp}): {total_replaced} neurons replaced")
+                f.write(f"Batch {batch_id:4d} ({timestamp}) [{layer_type}]: {total_replaced} neurons replaced")
                 
                 # Add layer replacement information
                 if 'layer_replacements' in stats:
@@ -161,6 +167,10 @@ class CBPLogger:
                     indices = stats['replaced_neuron_indices']
                     f.write(f"\n    └─ Replaced indices: {indices}")
                 
+                # Add layer names if provided
+                if 'layer_names' in stats:
+                    f.write(f"\n    └─ Layers: {stats['layer_names']}")
+                
                 f.write("\n")
         
         # Console output key information (only when replacement occurs)
@@ -168,16 +178,18 @@ class CBPLogger:
         if total_replaced > 0:
             # 🔥 Support multiple hidden layers: show replacement indices for each layer
             replaced_indices = stats.get('replaced_neuron_indices', [])
+            layer_names = stats.get('layer_names', [])
             layer_info = []
             
             for layer_idx, indices in enumerate(replaced_indices):
                 if indices:  # If this layer has neurons replaced
-                    layer_info.append(f"L{layer_idx}:{indices}")
+                    layer_name = layer_names[layer_idx] if layer_idx < len(layer_names) else f"L{layer_idx}"
+                    layer_info.append(f"{layer_name}:{indices}")
             
             if layer_info:
-                print(f"🔥 Batch {batch_id}: {total_replaced} neurons replaced [{', '.join(layer_info)}]")
+                print(f"🔥 Batch {batch_id} [{layer_type}]: {total_replaced} neurons replaced [{', '.join(layer_info)}]")
             else:
-                print(f"🔥 Batch {batch_id}: {total_replaced} neurons replaced")
+                print(f"🔥 Batch {batch_id} [{layer_type}]: {total_replaced} neurons replaced")
     
     def log_epoch_summary(self, epoch: int, stats: Dict):
         """Log epoch-level summary statistics"""
@@ -220,14 +232,32 @@ class CBPLogger:
                 f.write(f"Total batches processed: {stats['total_batches']}\n")
             
             # 🔥 Add summary information of replaced neuron indices
-            if 'all_replaced_indices' in stats:
+            if 'all_replaced_indices' in stats or 'ffn_replaced_indices' in stats or 'mpn_replaced_indices' in stats:
                 f.write(f"\n📍 Replaced Neuron Indices Summary:\n")
-                all_indices = stats['all_replaced_indices']
-                for layer_idx, layer_indices in enumerate(all_indices):
-                    if layer_indices:
-                        f.write(f"   Layer {layer_idx}: {layer_indices}\n")
-                    else:
-                        f.write(f"   Layer {layer_idx}: No replacements\n")
+                
+                # Display FFN layer indices
+                if 'ffn_replaced_indices' in stats:
+                    ffn_indices = stats['ffn_replaced_indices']
+                    if ffn_indices:
+                        f.write(f"  FFN Layers:\n")
+                        for layer_name, indices in sorted(ffn_indices.items()):
+                            if indices:
+                                f.write(f"    {layer_name}: {indices}\n")
+                elif 'all_replaced_indices' in stats:
+                    # Backward compatibility
+                    all_indices = stats['all_replaced_indices']
+                    for layer_idx, layer_indices in enumerate(all_indices):
+                        if layer_indices:
+                            f.write(f"   Layer {layer_idx}: {layer_indices}\n")
+                
+                # Display MPN layer indices
+                if 'mpn_replaced_indices' in stats:
+                    mpn_indices = stats['mpn_replaced_indices']
+                    if mpn_indices:
+                        f.write(f"  MPN Layers:\n")
+                        for layer_name, indices in sorted(mpn_indices.items()):
+                            if indices:
+                                f.write(f"    {layer_name}: {indices}\n")
             
             f.write(f"{'='*60}\n\n")
         
@@ -275,9 +305,9 @@ class GnTForChemprop:
         replacement_rate: float = 1e-4,
         init: str = 'kaiming',
         device: str = "cpu",
-        maturity_threshold: int = 20,
+        maturity_threshold: int = 100,
         util_type: str = 'contribution',
-        accumulate: bool = False,
+        accumulate: bool = True,
     ):
         self.device = device
         self.layers = ffn_layers
@@ -654,7 +684,7 @@ class ContinualBackpropTrainer:
         decay_rate: float = 0.9,
         maturity_threshold: int = 100,
         util_type: str = 'contribution',
-        accumulate: bool = False,
+        accumulate: bool = True,
         enable_cbp_logging: bool = True,
         log_dir: str = None,
     ):
@@ -666,10 +696,12 @@ class ContinualBackpropTrainer:
         self.enable_cbp_logging = enable_cbp_logging
         if self.enable_cbp_logging:
             self.cbp_logger = CBPLogger(log_dir=log_dir)
-            self.cbp_stats_buffer = []  # Collect statistics for each batch
+            self.cbp_stats_buffer = []  # Collect FFN statistics for each batch
+            self.mpn_stats_buffer = []  # Collect MPN statistics for each batch
         else:
             self.cbp_logger = None
             self.cbp_stats_buffer = []
+            self.mpn_stats_buffer = []
         
         # Setup optimizer - 🔥 Temporarily use standard Adam, not AdamGnT
         if args.optimizer == 'adam':
@@ -702,6 +734,62 @@ class ContinualBackpropTrainer:
             )
         else:
             self.gnt = None
+        
+        # 🔥 Set CBPLogger for MPN's CBPLinear layers if they exist
+        if self.enable_cbp_logging and self.cbp_logger:
+            self._setup_mpn_cbp_logging(model)
+    
+    def _setup_mpn_cbp_logging(self, model: MoleculeModel):
+        """
+        Set up CBP logging for MPN's CBPLinear layers.
+        
+        :param model: The MoleculeModel containing MPN encoder
+        """
+        try:
+            # Store reference to self for MPN stats collection
+            self.mpn_cbp_layers = []
+            
+            # Check if model has MPN encoder with CBP layers
+            if hasattr(model, 'encoder') and hasattr(model.encoder, 'encoder'):
+                # Handle both single encoder and ModuleList of encoders
+                encoders = model.encoder.encoder if isinstance(model.encoder.encoder, nn.ModuleList) else [model.encoder.encoder]
+                
+                for enc_idx, encoder in enumerate(encoders):
+                    # Check for CBPLinear layers in each encoder
+                    if hasattr(encoder, 'cbp_layer1'):
+                        encoder.cbp_layer1.cbp_logger = self.cbp_logger
+                        encoder.cbp_layer1.layer_name = f'MPN{enc_idx}_L1'
+                        encoder.cbp_layer1._batch_counter = 0
+                        encoder.cbp_layer1._trainer = self  # Reference to trainer for stats collection
+                        self.mpn_cbp_layers.append(encoder.cbp_layer1)
+                        
+                    if hasattr(encoder, 'cbp_layer2'):
+                        encoder.cbp_layer2.cbp_logger = self.cbp_logger
+                        encoder.cbp_layer2.layer_name = f'MPN{enc_idx}_L2'
+                        encoder.cbp_layer2._batch_counter = 0
+                        encoder.cbp_layer2._trainer = self  # Reference to trainer for stats collection
+                        self.mpn_cbp_layers.append(encoder.cbp_layer2)
+                        
+            # Also handle reaction solvent encoder if present
+            if hasattr(model, 'encoder') and hasattr(model.encoder, 'encoder_solvent'):
+                encoder_solvent = model.encoder.encoder_solvent
+                if hasattr(encoder_solvent, 'cbp_layer1'):
+                    encoder_solvent.cbp_layer1.cbp_logger = self.cbp_logger
+                    encoder_solvent.cbp_layer1.layer_name = 'MPN_Solvent_L1'
+                    encoder_solvent.cbp_layer1._batch_counter = 0
+                    encoder_solvent.cbp_layer1._trainer = self
+                    self.mpn_cbp_layers.append(encoder_solvent.cbp_layer1)
+                    
+                if hasattr(encoder_solvent, 'cbp_layer2'):
+                    encoder_solvent.cbp_layer2.cbp_logger = self.cbp_logger
+                    encoder_solvent.cbp_layer2.layer_name = 'MPN_Solvent_L2'
+                    encoder_solvent.cbp_layer2._batch_counter = 0
+                    encoder_solvent.cbp_layer2._trainer = self
+                    self.mpn_cbp_layers.append(encoder_solvent.cbp_layer2)
+                    
+        except Exception as e:
+            # Silently handle any errors in setting up MPN CBP logging
+            pass
 
     def train_step_advanced(self, 
                            batch_data: Dict,
@@ -870,18 +958,35 @@ class ContinualBackpropTrainer:
     
     def log_epoch_cbp_stats(self, epoch: int):
         """Aggregate CBP statistics for current epoch (based on batch-level data)"""
-        if not self.enable_cbp_logging or not self.cbp_stats_buffer:
+        if not self.enable_cbp_logging:
             return
         
-        # Aggregate statistics from all batches
-        epoch_stats = self.aggregate_cbp_stats(self.cbp_stats_buffer)
+        # Aggregate FFN statistics from all batches
+        if self.cbp_stats_buffer:
+            epoch_stats = self.aggregate_cbp_stats(self.cbp_stats_buffer)
+        else:
+            epoch_stats = {
+                'total_neurons_replaced': 0,
+                'layer_replacements': [],
+                'all_replaced_indices': [],
+                'ffn_replaced_indices': {},
+                'mpn_replaced_indices': {}
+            }
+        
+        # Aggregate MPN statistics
+        if self.mpn_stats_buffer:
+            mpn_aggregated = self.aggregate_mpn_stats(self.mpn_stats_buffer)
+            # Merge MPN stats into epoch_stats
+            epoch_stats['mpn_replaced_indices'] = mpn_aggregated['mpn_replaced_indices']
+            epoch_stats['total_neurons_replaced'] = epoch_stats.get('total_neurons_replaced', 0) + mpn_aggregated['total_replaced']
         
         # Log epoch-level summary
         if self.cbp_logger:
             self.cbp_logger.log_epoch_summary(epoch, epoch_stats)
         
-        # Clear buffer for next epoch
+        # Clear buffers for next epoch
         self.cbp_stats_buffer.clear()
+        self.mpn_stats_buffer.clear()
     
     def aggregate_cbp_stats(self, stats_buffer: List[Dict]):
         """Aggregate CBP statistics from multiple batches"""
@@ -938,13 +1043,19 @@ class ContinualBackpropTrainer:
             final_avg_utilities = []
             age_stats = {}
         
-        # 🔥 Aggregate all replaced neuron indices
+        # 🔥 Aggregate all replaced neuron indices for FFN
         all_replaced_indices = [[] for _ in range(num_layers)] if stats_buffer else []
+        ffn_replaced_indices = {}  # Store with layer names
+        
         for stats in stats_buffer:
             batch_indices = stats.get('replaced_neuron_indices', [])
             for layer_idx, indices in enumerate(batch_indices):
                 if layer_idx < len(all_replaced_indices) and indices:
                     all_replaced_indices[layer_idx].extend(indices)
+                    layer_name = f"FFN_Layer{layer_idx}"
+                    if layer_name not in ffn_replaced_indices:
+                        ffn_replaced_indices[layer_name] = []
+                    ffn_replaced_indices[layer_name].extend(indices)
         
         return {
             'total_neurons_replaced': total_replaced,
@@ -954,10 +1065,31 @@ class ContinualBackpropTrainer:
             'age_stats': age_stats,
             'active_batches': active_batches,
             'total_batches': len(stats_buffer),
-            'all_replaced_indices': all_replaced_indices  # 🔥 新增：汇总的神经元index
+            'all_replaced_indices': all_replaced_indices,  # 🔥 For backward compatibility
+            'ffn_replaced_indices': ffn_replaced_indices  # 🔥 New: FFN indices with layer names
+        }
+    
+    def aggregate_mpn_stats(self, mpn_stats_buffer: List[Dict]):
+        """Aggregate MPN CBP statistics from multiple batches"""
+        mpn_replaced_indices = {}
+        total_replaced = 0
+        
+        for stats in mpn_stats_buffer:
+            layer_name = stats.get('layer_name', 'Unknown')
+            if layer_name not in mpn_replaced_indices:
+                mpn_replaced_indices[layer_name] = []
+            
+            indices = stats.get('replaced_indices', [])
+            if indices:
+                mpn_replaced_indices[layer_name].extend(indices)
+                total_replaced += stats.get('num_replaced', 0)
+        
+        return {
+            'mpn_replaced_indices': mpn_replaced_indices,
+            'total_replaced': total_replaced
         }
     
     def save_cbp_summary(self):
-        """保存CBP训练总结"""
+        """Save cbp training summary"""
         if self.enable_cbp_logging and self.cbp_logger:
             self.cbp_logger.save_summary() 

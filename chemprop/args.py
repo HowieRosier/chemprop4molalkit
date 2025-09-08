@@ -430,7 +430,7 @@ class TrainArgs(CommonArgs):
     """Replacement rate for Generate-and-Test (GnT) in CBP."""
     decay_rate: float = 0.99
     """Decay rate for utility tracking in GnT."""
-    maturity_threshold: int = 20
+    maturity_threshold: int = 100
     """Maturity threshold for a neuron to be eligible for replacement."""
     util_type: str = 'contribution'
     """Utility type for neuron importance calculation (e.g., 'contribution', 'weight')."""
@@ -1066,3 +1066,4 @@ class SklearnPredictArgs(Tap):
             checkpoint_dir=self.checkpoint_dir,
             ext='.pkl'
         )
+
