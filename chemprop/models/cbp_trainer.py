@@ -429,11 +429,10 @@ class ContinualBackpropTrainer:
         # No need for manual GnT step - the backward hooks trigger replacement
         
         return loss.item()
-    
-    
+
     # Note: Batch-level logging is now handled directly by CBPLinear layers
     # through their _log_replacement_stats method
-    
+
     def log_epoch_cbp_stats(self, epoch: int):
         """Aggregate CBP statistics for current epoch from all CBPLinear layers."""
         if not self.enable_cbp_logging:

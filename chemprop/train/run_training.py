@@ -584,21 +584,3 @@ def run_training(args: TrainArgs,
     ensemble_scores['_save_dir'] = args.save_dir
     
     return ensemble_scores
-
-
-# Create backward compatibility alias
-def run_training_cbp(args: TrainArgs,
-                     data: MoleculeDataset,
-                     logger: Logger = None) -> Dict[str, List[float]]:
-    """
-    Backward compatibility wrapper for CBP training.
-    Ensures CBP mode is enabled and calls the unified run_training function.
-    
-    :param args: A :class:`~chemprop.args.TrainArgs` object containing arguments.
-    :param data: A :class:`~chemprop.data.MoleculeDataset` containing the data.
-    :param logger: A logger to record output.
-    :return: A dictionary mapping each metric to a list of values for each task.
-    """
-    # Ensure CBP mode is enabled
-    args.cbp = True
-    return run_training(args, data, logger)

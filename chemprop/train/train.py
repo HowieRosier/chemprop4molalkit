@@ -84,8 +84,8 @@ def train(model: MoleculeModel,
                 'bond_features_batch': bond_features_batch
             }
             
-            # Use CBP trainer's advanced training step
-            loss = cbp_trainer.train_step_advanced(
+            # Use CBP trainer's training step
+            loss = cbp_trainer.train_step(
                 batch_data=cbp_batch_data,
                 targets=targets,
                 mask=mask,
@@ -182,32 +182,3 @@ def train(model: MoleculeModel,
     avg_epoch_loss = epoch_loss_sum / epoch_batch_count if epoch_batch_count > 0 else 0.0
     
     return n_iter, avg_epoch_loss
-
-
-# Create aliases for backward compatibility
-def train_cbp(model: MoleculeModel,
-              data_loader: MoleculeDataLoader,
-              loss_func: Callable,
-              optimizer: Optimizer,
-              scheduler: _LRScheduler,
-              args: TrainArgs,
-              cbp_trainer: 'ContinualBackpropTrainer',
-              n_iter: int = 0,
-              logger: logging.Logger = None,
-              writer: SummaryWriter = None) -> tuple[int, float]:
-    """
-    Backward compatibility wrapper for CBP training.
-    Now just calls the unified train function with cbp_trainer.
-    """
-    return train(
-        model=model,
-        data_loader=data_loader,
-        loss_func=loss_func,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        args=args,
-        n_iter=n_iter,
-        logger=logger,
-        writer=writer,
-        cbp_trainer=cbp_trainer
-    )
