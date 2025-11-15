@@ -4,6 +4,39 @@ from math import sqrt
 from typing import Optional, Dict
 
 
+def log_gradients(m, grad_input, grad_output):
+    """Backward hook to log gradient information."""
+    if not m.training or not hasattr(m, 'cbp_logger'):
+        return
+
+    # Only log gradients periodically to avoid overhead
+    if hasattr(m, '_grad_log_counter'):
+        m._grad_log_counter += 1
+    else:
+        m._grad_log_counter = 1
+
+    # Log every N batches (configurable)
+    log_frequency = getattr(m, 'grad_log_frequency', 100)
+    if m._grad_log_counter % log_frequency != 0:
+        return
+
+    with torch.no_grad():
+        # Get gradient magnitude for each neuron
+        if grad_output[0] is not None:
+            grad_magnitude = grad_output[0].abs().mean(dim=0)
+
+            # Log to CBP logger if available
+            if hasattr(m, 'cbp_logger') and m.cbp_logger is not None:
+                m.cbp_logger.log_gradients(
+                    layer_name=m.layer_name,
+                    gradients=grad_magnitude,
+                    utilities=m.util,
+                    ages=m.ages,
+                    batch_idx=m._grad_log_counter,
+                    epoch=getattr(m, 'current_epoch', 0)
+                )
+
+
 def call_reinit(m, i, o):
     m.reinit()
 
@@ -30,6 +63,31 @@ def log_features(m, i, o):
             new_util = output_weight_mag * i[0].abs().mean(dim=0)
 
         m.util.data += (1 - m.decay_rate) * new_util
+
+        # Log to CBP logger if available (in forward hook for reliability)
+        if hasattr(m, 'cbp_logger') and m.cbp_logger is not None:
+            # Update batch counter
+            if not hasattr(m, '_forward_log_counter'):
+                m._forward_log_counter = 0
+            m._forward_log_counter += 1
+
+            # Log periodically based on frequency
+            log_freq = getattr(m, 'grad_log_frequency', 1000000)
+            if m._forward_log_counter % log_freq == 0:
+                # Get gradient magnitude if available (from last backward pass)
+                grad_magnitude = torch.zeros_like(m.util)
+                if hasattr(m.out_layer.weight, 'grad') and m.out_layer.weight.grad is not None:
+                    grad_magnitude = m.out_layer.weight.grad.abs().mean(dim=0)
+
+                # Log all data
+                m.cbp_logger.log_gradients(
+                    layer_name=m.layer_name,
+                    gradients=grad_magnitude,
+                    utilities=m.util,
+                    ages=m.ages,
+                    batch_idx=m._forward_log_counter,
+                    epoch=getattr(m, 'current_epoch', 0)
+                )
 
 
 def get_layer_bound(layer, init, gain):
@@ -65,6 +123,7 @@ class CBPLinear(nn.Module):
             layer_type='MPN',  # 'MPN' or 'FFN' to distinguish layer types
             layer_name=None,  # Optional custom name for logging
             accumulate=True,  # Whether to accumulate replacement counts
+            grad_log_frequency=1000000,  # How often to log gradients (default: epoch-level only)
     ):
         super().__init__()
         if type(in_layer) is not nn.Linear:
@@ -82,12 +141,19 @@ class CBPLinear(nn.Module):
         self.layer_type = layer_type
         self.layer_name = layer_name or f'{layer_type}_layer'
         self.accumulate = accumulate
+        self.cbp_logger = cbp_logger  # Use unified CBPLogger
+        self.grad_log_frequency = grad_log_frequency
+        self.current_epoch = 0
         """
         Register hooks
         """
         if self.replacement_rate > 0:
             self.register_full_backward_hook(call_reinit)
             self.register_forward_hook(log_features)
+
+        # Register gradient logging hook if CBP logger is provided
+        if cbp_logger is not None:
+            self.register_full_backward_hook(log_gradients)
 
         self.in_layer = in_layer
         self.add_in_dim = add_in_dim
@@ -100,10 +166,6 @@ class CBPLinear(nn.Module):
         self.util = nn.Parameter(torch.zeros(self.in_layer.out_features + add_in_dim), requires_grad=False)
         self.ages = nn.Parameter(torch.zeros(self.in_layer.out_features + add_in_dim), requires_grad=False)
         self.accumulated_num_features_to_replace = nn.Parameter(torch.zeros(1), requires_grad=False)
-        """
-        CBP Logger for tracking neuron replacements
-        """
-        self.cbp_logger = cbp_logger
         self._batch_counter = 0
         """
         Calculate uniform distribution's bound for random feature initialization
@@ -186,53 +248,25 @@ class CBPLinear(nn.Module):
 
     def _log_replacement_stats(self, features_to_replace: torch.Tensor, num_features_to_replace: int):
         """
-        Log CBP replacement statistics to logger and trainer buffer.
-        
+        Log CBP replacement statistics to unified logger.
+
         Args:
             features_to_replace: Tensor containing indices of replaced features
             num_features_to_replace: Number of features being replaced
         """
         if num_features_to_replace == 0:
             return
-            
-        try:
-            # Log to CBPLogger if available
-            if hasattr(self, 'cbp_logger') and self.cbp_logger is not None:
-                layer_name = getattr(self, 'layer_name', f'{self.layer_type}_layer')
 
-                stats = {
-                    'total_neurons_replaced': int(num_features_to_replace),
-                    'layer_replacements': [int(num_features_to_replace)],
-                    'replaced_neuron_indices': [features_to_replace.detach().cpu().tolist()],
-                    'layer_names': [layer_name],
-                }
-
-                # Initialize batch counter if needed
-                if not hasattr(self, '_batch_counter'):
-                    self._batch_counter = 0
-                self._batch_counter += 1
-
-                # Log batch statistics
-                self.cbp_logger.log_batch_stats(self._batch_counter, stats, layer_type=self.layer_type)
-            
-            # Store stats in trainer's buffer for epoch aggregation
-            if hasattr(self, '_trainer'):
-                layer_name = getattr(self, 'layer_name', f'{self.layer_type}_layer')
-                stats = {
-                    'layer_name': layer_name,
-                    'replaced_indices': features_to_replace.detach().cpu().tolist(),
-                    'num_replaced': int(num_features_to_replace),
-                    'layer_type': self.layer_type
-                }
-                # Use appropriate buffer based on layer type
-                if self.layer_type == 'FFN' and hasattr(self._trainer, 'ffn_stats_buffer'):
-                    self._trainer.ffn_stats_buffer.append(stats)
-                elif self.layer_type == 'MPN' and hasattr(self._trainer, 'mpn_stats_buffer'):
-                    self._trainer.mpn_stats_buffer.append(stats)
-                
-        except Exception:
-            # Silently handle any logging errors to avoid disrupting training
-            pass
+        # Log to CBPLogger if available
+        if self.cbp_logger is not None:
+            self._batch_counter += 1
+            self.cbp_logger.log_replacement_event(
+                layer_name=self.layer_name,
+                replaced_indices=features_to_replace.detach().cpu().tolist(),
+                replacement_rate=self.replacement_rate,
+                batch_idx=self._batch_counter,
+                epoch=self.current_epoch
+            )
     
     def reinit(self):
         """

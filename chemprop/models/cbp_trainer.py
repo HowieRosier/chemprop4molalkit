@@ -11,191 +11,17 @@ Key simplifications from the original implementation:
 4. Simplified logging and statistics collection
 """
 
-from typing import Dict, Callable
+from typing import Dict, Callable, Optional
 import torch
 import torch.nn as nn
 from torch.optim import SGD, Adam
 import json
-import os
 from datetime import datetime
 
 from chemprop.models.model import MoleculeModel
 from chemprop.models.AdamGnT import AdamGnT
 from chemprop.args import TrainArgs
-
-
-class CBPLogger:
-    """Logger for monitoring CBP training statistics."""
-    
-    def __init__(self, log_dir: str = None, log_filename: str = None):
-        # Use environment variable if set, otherwise use default
-        self.log_dir = log_dir or os.environ.get('CBP_LOG_DIR', "cbp_logs")
-        os.makedirs(self.log_dir, exist_ok=True)
-        
-        if log_filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_filename = f"cbp_training_{timestamp}.log"
-        
-        self.log_file = os.path.join(self.log_dir, log_filename)
-        self.stats_history = []
-        
-        # Initialize log file
-        with open(self.log_file, 'w') as f:
-            f.write(f"CBP Training Log - Started at {datetime.now()}\n")
-            f.write("="*80 + "\n")
-    
-    def log_batch_stats(self, batch_id: int, stats: Dict, layer_type: str = "FFN"):
-        """
-        Log batch-level CBP statistics, including replaced neuron indices
-        
-        :param batch_id: Batch number
-        :param stats: Dictionary containing CBP statistics
-        :param layer_type: Type of layer ("FFN" or "MPN")
-        """
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        
-        # Write to log file
-        with open(self.log_file, 'a') as f:
-            total_replaced = stats.get('total_neurons_replaced', 0)
-            if total_replaced > 0:
-                f.write(f"Batch {batch_id:4d} ({timestamp}) [{layer_type}]: {total_replaced} neurons replaced")
-                
-                # Add layer replacement information
-                if 'layer_replacements' in stats:
-                    f.write(f" {stats['layer_replacements']}")
-                
-                # 🔥 Add specific indices of replaced neurons
-                if 'replaced_neuron_indices' in stats:
-                    indices = stats['replaced_neuron_indices']
-                    f.write(f"\n    └─ Replaced indices: {indices}")
-                
-                # Add layer names if provided
-                if 'layer_names' in stats:
-                    f.write(f"\n    └─ Layers: {stats['layer_names']}")
-                
-                f.write("\n")
-        
-        # Console output key information (only when replacement occurs)
-        total_replaced = stats.get('total_neurons_replaced', 0)
-        if total_replaced > 0:
-            # 🔥 Support multiple hidden layers: show replacement indices for each layer
-            replaced_indices = stats.get('replaced_neuron_indices', [])
-            layer_names = stats.get('layer_names', [])
-            layer_info = []
-            
-            for layer_idx, indices in enumerate(replaced_indices):
-                if indices:  # If this layer has neurons replaced
-                    layer_name = layer_names[layer_idx] if layer_idx < len(layer_names) else f"L{layer_idx}"
-                    layer_info.append(f"{layer_name}:{indices}")
-            
-            if layer_info:
-                print(f"🔥 Batch {batch_id} [{layer_type}]: {total_replaced} neurons replaced [{', '.join(layer_info)}]")
-            else:
-                print(f"🔥 Batch {batch_id} [{layer_type}]: {total_replaced} neurons replaced")
-    
-    def log_epoch_summary(self, epoch: int, stats: Dict):
-        """Log epoch-level summary statistics"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Add to history
-        epoch_data = {
-            'epoch': epoch,
-            'timestamp': timestamp,
-            **stats
-        }
-        self.stats_history.append(epoch_data)
-        
-        # Write to log file
-        with open(self.log_file, 'a') as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"EPOCH {epoch} SUMMARY - {timestamp}\n")
-            f.write(f"{'='*60}\n")
-            
-            # Key metrics
-            total_replaced = stats.get('total_neurons_replaced', 0)
-            f.write(f"🔥 Total neurons replaced this epoch: {total_replaced}\n")
-            
-            if 'layer_replacements' in stats:
-                f.write(f"Layer-wise replacements: {stats['layer_replacements']}\n")
-            
-            if 'replacement_rates' in stats:
-                f.write(f"Average replacement rates: {stats['replacement_rates']}\n")
-            
-            if 'avg_utilities' in stats:
-                f.write(f"Average utilities: {stats['avg_utilities']}\n")
-            
-            if 'age_stats' in stats:
-                f.write(f"Age statistics: {stats['age_stats']}\n")
-            
-            if 'active_batches' in stats:
-                f.write(f"Active batches (with replacements): {stats['active_batches']}\n")
-            
-            if 'total_batches' in stats:
-                f.write(f"Total batches processed: {stats['total_batches']}\n")
-            
-            # 🔥 Add summary information of replaced neuron indices
-            if 'all_replaced_indices' in stats or 'ffn_replaced_indices' in stats or 'mpn_replaced_indices' in stats:
-                f.write(f"\n📍 Replaced Neuron Indices Summary:\n")
-                
-                # Display FFN layer indices
-                if 'ffn_replaced_indices' in stats:
-                    ffn_indices = stats['ffn_replaced_indices']
-                    if ffn_indices:
-                        f.write(f"  FFN Layers:\n")
-                        for layer_name, indices in sorted(ffn_indices.items()):
-                            if indices:
-                                f.write(f"    {layer_name}: {indices}\n")
-                elif 'all_replaced_indices' in stats:
-                    # Backward compatibility
-                    all_indices = stats['all_replaced_indices']
-                    for layer_idx, layer_indices in enumerate(all_indices):
-                        if layer_indices:
-                            f.write(f"   Layer {layer_idx}: {layer_indices}\n")
-                
-                # Display MPN layer indices
-                if 'mpn_replaced_indices' in stats:
-                    mpn_indices = stats['mpn_replaced_indices']
-                    if mpn_indices:
-                        f.write(f"  MPN Layers:\n")
-                        for layer_name, indices in sorted(mpn_indices.items()):
-                            if indices:
-                                f.write(f"    {layer_name}: {indices}\n")
-            
-            f.write(f"{'='*60}\n\n")
-        
-        # Console output key information
-        print(f"💡 CBP Epoch {epoch}: {total_replaced} neurons replaced total")
-    
-    def save_summary(self):
-        """Save training summary"""
-        if not self.stats_history:
-            return
-        
-        summary_file = self.log_file.replace('.log', '_summary.json')
-        
-        # Calculate summary statistics
-        total_epochs = len(self.stats_history)
-        total_replacements = sum(epoch.get('total_neurons_replaced', 0) for epoch in self.stats_history)
-        avg_replacements = total_replacements / total_epochs if total_epochs > 0 else 0
-        
-        summary = {
-            'training_summary': {
-                'total_epochs': total_epochs,
-                'total_neuron_replacements': total_replacements,
-                'average_replacements_per_epoch': avg_replacements,
-                'start_time': self.stats_history[0]['timestamp'] if self.stats_history else None,
-                'end_time': self.stats_history[-1]['timestamp'] if self.stats_history else None
-            },
-            'detailed_history': self.stats_history
-        }
-        
-        with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2)
-        
-        print(f"📊 CBP Training Summary saved to: {summary_file}")
-
-
-# GnTForChemprop class removed - functionality now handled by CBPLinear layers directly
+from .cbp_logger import CBPLogger
 
 
 class ContinualBackpropTrainer:
@@ -214,6 +40,11 @@ class ContinualBackpropTrainer:
         enable_cbp_logging: bool = True,
         log_dir: str = None,
         use_adamgnt: bool = False,
+        enable_gradient_logging: bool = False,
+        gradient_log_frequency: int = 100,
+        enable_wandb: bool = False,
+        wandb_project: str = "cbp-training",
+        wandb_entity: Optional[str] = None,
     ):
         self.model = model
         self.args = args
@@ -236,17 +67,35 @@ class ContinualBackpropTrainer:
             self.cbp_layers = []
             print("⚠️ No CBPLinear layers found - model might not have CBP enabled")
 
-        # Setup logging
+        # Setup unified CBP logging (including gradient logging)
         self.enable_cbp_logging = enable_cbp_logging and len(self.cbp_layers) > 0
-        if self.enable_cbp_logging:
-            self.cbp_logger = CBPLogger(log_dir=log_dir)
-            self.ffn_stats_buffer = []
-            self.mpn_stats_buffer = []
+        self.enable_gradient_logging = enable_gradient_logging
+        self.cbp_logger = None
+
+        if self.enable_cbp_logging or enable_gradient_logging:
+            # Create unified CBP logger
+            cbp_log_dir = log_dir if log_dir else "cbp_logs"
+            self.cbp_logger = CBPLogger(
+                log_dir=cbp_log_dir,
+                log_frequency=gradient_log_frequency,
+                enable_wandb=enable_wandb,
+                wandb_project=wandb_project,
+                wandb_entity=wandb_entity,
+                track_histogram=True
+            )
+
+            # Attach logger to all CBP layers
+            for cbp_layer in self.cbp_layers:
+                cbp_layer.cbp_logger = self.cbp_logger
+                cbp_layer.grad_log_frequency = gradient_log_frequency
+
             self._setup_cbp_logging()
-        else:
-            self.cbp_logger = None
-            self.ffn_stats_buffer = []
-            self.mpn_stats_buffer = []
+
+            print(f"📊 CBP logging enabled - logs will be saved to {cbp_log_dir}")
+            if enable_gradient_logging:
+                print(f"📈 Gradient tracking enabled")
+            if enable_wandb:
+                print(f"📈 WandB integration enabled - project: {wandb_project}")
 
         # Setup optimizer
         if use_adamgnt:
@@ -269,7 +118,7 @@ class ContinualBackpropTrainer:
                 momentum=0.9,
                 weight_decay=args.weight_decay
             )
-    
+
     def _configure_cbp_layers(self, replacement_rate, decay_rate, maturity_threshold, util_type, accumulate):
         """Configure all CBPLinear layers with unified parameters."""
         for i, cbp_layer in enumerate(self.cbp_layers):
@@ -290,71 +139,100 @@ class ContinualBackpropTrainer:
     def _setup_cbp_logging(self):
         """Setup logging for all CBPLinear layers."""
         for cbp_layer in self.cbp_layers:
-            cbp_layer.cbp_logger = self.cbp_logger
             cbp_layer._batch_counter = 0
-            cbp_layer._trainer = self  # Reference to trainer for stats collection
+            cbp_layer.current_epoch = 0
+
+            # Register gradient logging hook if not already registered
+            if self.enable_gradient_logging and cbp_layer.cbp_logger is not None:
+                # Import the log_gradients function from cbp_linear
+                from .cbp_linear import log_gradients
+                # Register the hook if not already done
+                if not any(isinstance(h, type(log_gradients)) for h in cbp_layer._backward_hooks.values() if hasattr(cbp_layer, '_backward_hooks')):
+                    cbp_layer.register_full_backward_hook(log_gradients)
 
     def train_step(self,
                    batch_data: Dict = None,
                    targets: torch.Tensor = None,
-                   mask: torch.Tensor = None,
-                   target_weights: torch.Tensor = None,
+                   atom_descriptors_batch: torch.Tensor = None,
+                   atom_features_batch: torch.Tensor = None,
+                   bond_descriptors_batch: torch.Tensor = None,
+                   bond_features_batch: torch.Tensor = None,
                    data_weights: torch.Tensor = None,
-                   loss_func: Callable = None,
-                   args: TrainArgs = None,
+                   target_weights: torch.Tensor = None,
+                   mask: torch.Tensor = None,
                    lt_targets: torch.Tensor = None,
                    gt_targets: torch.Tensor = None,
-                   # Legacy simple interface
-                   batch=None) -> float:
+                   batch_idx: int = 0,
+                   epoch: int = 0,
+                   loss_func: Callable = None):
         """
-        Unified training step that supports both simple and advanced interfaces.
+        Unified train step for CBP training using the embedded CBPLinear layers
 
-        Simple interface (legacy):
-            train_step(batch=(mol_batch, features_batch), targets=targets)
+        Args:
+            batch_data: Dictionary containing batch data prepared by get_batch_data()
+            targets: Target values
+            atom_descriptors_batch: Atom-level descriptors
+            atom_features_batch: Atom features
+            bond_descriptors_batch: Bond descriptors (not currently used in molecules)
+            bond_features_batch: Bond features
+            data_weights: Per-sample weights
+            target_weights: Per-target weights
+            mask: Binary mask for valid values
+            lt_targets: Less than targets for bounded regression
+            gt_targets: Greater than targets for bounded regression
+            batch_idx: Current batch index
+            epoch: Current epoch
+            loss_func: Loss function to use
 
-        Advanced interface:
-            train_step(batch_data=..., targets=..., mask=..., ...)
-
-        :param batch_data: Dictionary containing all batch data
-        :param targets: Target values
-        :param mask: Mask for valid targets
-        :param target_weights: Weights for different targets
-        :param data_weights: Weights for different samples
-        :param loss_func: Loss function to use
-        :param args: Training arguments (uses self.args if not provided)
-        :param lt_targets: Lower bound targets (for bounded_mse)
-        :param gt_targets: Upper bound targets (for bounded_mse)
-        :param batch: Legacy tuple of (mol_batch, features_batch)
-        :return: Loss value
+        Returns:
+            loss: Training loss value
         """
-        # Handle legacy simple interface
-        if batch is not None and batch_data is None:
-            mol_batch, features_batch = batch
-            batch_data = {
-                'mol_batch': mol_batch,
-                'features_batch': features_batch,
-                'atom_descriptors_batch': None,
-                'atom_features_batch': None,
-                'bond_features_batch': None
-            }
+        # Prepare batch data if not already prepared
+        if batch_data is None:
+            # This should be prepared by the training loop
+            raise ValueError("batch_data must be provided")
 
-        # Use default args if not provided
-        if args is None:
-            args = self.args
+        # Get arguments for loss calculation
+        args = self.args
 
-        # Create default mask and weights if not provided
-        if mask is None:
-            mask = torch.ones_like(targets, dtype=torch.bool)
-        if target_weights is None:
-            num_tasks = targets.shape[1] if len(targets.shape) > 1 else 1
-            target_weights = torch.ones(1, num_tasks)
-        if data_weights is None:
-            batch_size = targets.shape[0]
-            data_weights = torch.ones(batch_size, 1)
-
-        # Create default loss function if not provided
+        # 🔥 Complete loss function handling logic from original train.py
         if loss_func is None:
             if args.dataset_type == 'classification':
+                if args.loss_function == 'binary_cross_entropy':
+                    loss_func = nn.BCEWithLogitsLoss(reduction='none')
+                elif args.loss_function == 'mcc':
+                    loss_func = mcc_loss_func
+                elif args.loss_function == 'dirichlet':
+                    loss_func = dirichlet_class_loss
+                else:
+                    raise ValueError(f'Loss function {args.loss_function} not supported for {args.dataset_type} dataset type')
+            elif args.dataset_type == 'regression':
+                if args.loss_function == 'mse':
+                    loss_func = nn.MSELoss(reduction='none')
+                elif args.loss_function == 'bounded_mse':
+                    loss_func = bounded_mse_loss
+                elif args.loss_function == 'evidential':
+                    loss_func = evidential_loss
+                else:
+                    raise ValueError(f'Loss function {args.loss_function} not supported for {args.dataset_type} dataset type')
+            elif args.dataset_type == 'multiclass':
+                if args.loss_function == 'cross_entropy':
+                    loss_func = nn.CrossEntropyLoss(reduction='none')
+                elif args.loss_function == 'mcc':
+                    loss_func = mcc_multiclass_loss_func
+                elif args.loss_function == 'dirichlet':
+                    loss_func = dirichlet_multiclass_loss
+                else:
+                    raise ValueError(f'Loss function {args.loss_function} not supported for {args.dataset_type} dataset type')
+            elif args.dataset_type == 'spectra':
+                if args.loss_function == 'sid':
+                    loss_func = sid_loss
+                elif args.loss_function == 'wasserstein':
+                    loss_func = wasserstein_loss
+                else:
+                    raise ValueError(f'Loss function {args.loss_function} not supported for {args.dataset_type} dataset type')
+            # Default to appropriate loss for simple cases
+            elif args.dataset_type == 'classification':
                 loss_func = nn.BCEWithLogitsLoss(reduction='none')
             elif args.dataset_type == 'multiclass':
                 loss_func = nn.CrossEntropyLoss(reduction='none')
@@ -412,7 +290,7 @@ class ContinualBackpropTrainer:
             loss = loss_func(preds, targets, args.evidential_regularization) * target_weights * data_weights * mask
         else:
             loss = loss_func(preds, targets) * target_weights * data_weights * mask
-        
+
         loss = loss.sum() / mask.sum()
 
         # 🔥 Standard backpropagation step
@@ -427,57 +305,44 @@ class ContinualBackpropTrainer:
 
         # 🔥 CBPLinear layers handle neuron replacement automatically through their hooks
         # No need for manual GnT step - the backward hooks trigger replacement
-        
+
+        # Log training metrics
+        if self.cbp_logger:
+            self.cbp_logger.log_training_metrics(
+                loss=loss.item(),
+                batch_idx=batch_idx,
+                epoch=epoch
+            )
+
         return loss.item()
 
     # Note: Batch-level logging is now handled directly by CBPLinear layers
     # through their _log_replacement_stats method
 
     def log_epoch_cbp_stats(self, epoch: int):
-        """Aggregate CBP statistics for current epoch from all CBPLinear layers."""
-        if not self.enable_cbp_logging:
-            return
+        """Update epoch information and save epoch summary."""
+        # Update epoch for all CBP layers
+        for cbp_layer in self.cbp_layers:
+            cbp_layer.current_epoch = epoch
 
-        epoch_stats = {
-            'total_neurons_replaced': 0,
-            'ffn_replaced_indices': {},
-            'mpn_replaced_indices': {}
-        }
-
-        # Aggregate FFN statistics
-        if self.ffn_stats_buffer:
-            for stats in self.ffn_stats_buffer:
-                layer_name = stats.get('layer_name', 'Unknown')
-                indices = stats.get('replaced_indices', [])
-                if indices:
-                    if layer_name not in epoch_stats['ffn_replaced_indices']:
-                        epoch_stats['ffn_replaced_indices'][layer_name] = []
-                    epoch_stats['ffn_replaced_indices'][layer_name].extend(indices)
-                    epoch_stats['total_neurons_replaced'] += stats.get('num_replaced', 0)
-
-        # Aggregate MPN statistics
-        if self.mpn_stats_buffer:
-            for stats in self.mpn_stats_buffer:
-                layer_name = stats.get('layer_name', 'Unknown')
-                indices = stats.get('replaced_indices', [])
-                if indices:
-                    if layer_name not in epoch_stats['mpn_replaced_indices']:
-                        epoch_stats['mpn_replaced_indices'][layer_name] = []
-                    epoch_stats['mpn_replaced_indices'][layer_name].extend(indices)
-                    epoch_stats['total_neurons_replaced'] += stats.get('num_replaced', 0)
-
-        # Log epoch-level summary
+        # Save epoch summary using unified CBP logger
         if self.cbp_logger:
-            self.cbp_logger.log_epoch_summary(epoch, epoch_stats)
+            self.cbp_logger.save_epoch_summary(epoch)
 
-        # Clear buffers for next epoch
-        self.ffn_stats_buffer.clear()
-        self.mpn_stats_buffer.clear()
-    
+            # Log CBP-specific statistics
+            total_replacements = self.cbp_logger.get_total_replacements()
+            if total_replacements > 0:
+                self.cbp_logger.log_cbp_stats(
+                    replacement_count=total_replacements,
+                    epoch=epoch
+                )
+
     # Simplified aggregation methods are no longer needed since we aggregate directly
     # in log_epoch_cbp_stats. The CBPLinear layers handle their own statistics.
-    
+
     def save_cbp_summary(self):
-        """Save cbp training summary"""
-        if self.enable_cbp_logging and self.cbp_logger:
-            self.cbp_logger.save_summary() 
+        """Save CBP training summary and close logger."""
+        if self.cbp_logger:
+            self.cbp_logger.save_full_history()
+            self.cbp_logger.close()
+            print("📊 CBP history and gradients saved successfully")

@@ -23,7 +23,8 @@ def train(model: MoleculeModel,
           n_iter: int = 0,
           logger: logging.Logger = None,
           writer: SummaryWriter = None,
-          cbp_trainer: Optional['ContinualBackpropTrainer'] = None) -> tuple[int, float]:
+          cbp_trainer: Optional['ContinualBackpropTrainer'] = None,
+          epoch: int = 0) -> tuple[int, float]:
     """
     Trains a model for an epoch, with optional Continual Backpropagation support.
 
@@ -49,7 +50,7 @@ def train(model: MoleculeModel,
     epoch_loss_sum = 0  # Track total loss for the epoch
     epoch_batch_count = 0  # Track number of batches
 
-    for batch in tqdm(data_loader, total=len(data_loader), leave=False):
+    for batch_idx, batch in enumerate(tqdm(data_loader, total=len(data_loader), leave=False)):
         # Prepare batch
         batch: MoleculeDataset
         mol_batch, features_batch, target_batch, mask_batch, atom_descriptors_batch, atom_features_batch, bond_features_batch, data_weights_batch = \
@@ -92,9 +93,10 @@ def train(model: MoleculeModel,
                 target_weights=target_weights,
                 data_weights=data_weights,
                 loss_func=loss_func,
-                args=args,
                 lt_targets=lt_target_batch if args.loss_function == 'bounded_mse' else None,
-                gt_targets=gt_target_batch if args.loss_function == 'bounded_mse' else None
+                gt_targets=gt_target_batch if args.loss_function == 'bounded_mse' else None,
+                batch_idx=batch_idx,
+                epoch=epoch
             )
             
         else:

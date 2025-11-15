@@ -359,6 +359,8 @@ def run_training(args: TrainArgs,
                 maturity_threshold=args.maturity_threshold,
                 util_type=args.util_type,
                 accumulate=False,
+                enable_gradient_logging=args.enable_gradient_logging,  # From command line args
+                gradient_log_frequency=args.gradient_log_frequency,  # From command line args
             )
             # Use CBP trainer's optimizer
             optimizer = cbp_trainer.optimizer
@@ -392,7 +394,8 @@ def run_training(args: TrainArgs,
                 cbp_trainer=cbp_trainer,  # Pass CBP trainer if available
                 n_iter=n_iter,
                 logger=logger,
-                writer=writer
+                writer=writer,
+                epoch=epoch
             )
             
             # Record epoch loss

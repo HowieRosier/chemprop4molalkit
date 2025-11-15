@@ -31,7 +31,7 @@ class FFNNetworkCBP(nn.Module):
     def _build_cbp_structure(self, original_layers):
         """Build FFN structure with CBPLinear layers between linear layers."""
         new_layers = nn.ModuleList()
-        cbp_layers = nn.ModuleList()
+        cbp_layers = []  # Changed from nn.ModuleList() to regular list
         linear_layers = []
         linear_indices = []
 
