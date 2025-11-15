@@ -14,7 +14,21 @@ def log_features(m, i, o):
     with torch.no_grad():
         m.util.data *= m.decay_rate
         output_weight_mag = m.out_layer.weight.data.abs().mean(dim=0)
-        new_util = output_weight_mag * i[0].abs().mean(dim=0)
+
+        # Calculate utility based on util_type
+        if m.util_type == 'contribution':
+            new_util = output_weight_mag * i[0].abs().mean(dim=0)
+        elif m.util_type == 'weight':
+            new_util = output_weight_mag
+        elif m.util_type == 'adaptation':
+            input_weight_mag = m.in_layer.weight.data.abs().mean(dim=1)
+            new_util = 1 / (input_weight_mag + 1e-8)  # Add small epsilon for stability
+        elif m.util_type == 'random':
+            new_util = torch.rand_like(m.util.data)
+        else:
+            # Default to contribution
+            new_util = output_weight_mag * i[0].abs().mean(dim=0)
+
         m.util.data += (1 - m.decay_rate) * new_util
 
 
@@ -48,6 +62,9 @@ class CBPLinear(nn.Module):
             util_type='contribution',
             decay_rate=0.99,
             cbp_logger=None,  # CBPLogger instance or None
+            layer_type='MPN',  # 'MPN' or 'FFN' to distinguish layer types
+            layer_name=None,  # Optional custom name for logging
+            accumulate=True,  # Whether to accumulate replacement counts
     ):
         super().__init__()
         if type(in_layer) is not nn.Linear:
@@ -62,6 +79,9 @@ class CBPLinear(nn.Module):
         self.util_type = util_type
         self.decay_rate = decay_rate
         self.previous_features = None
+        self.layer_type = layer_type
+        self.layer_name = layer_name or f'{layer_type}_layer'
+        self.accumulate = accumulate
         """
         Register hooks
         """
@@ -107,12 +127,23 @@ class CBPLinear(nn.Module):
                                                (torch.arange(len(self.ages), device=self.ages.device) >= self.add_in_dim))[0]
         if eligible_feature_indices.shape[0] == 0:  return features_to_replace
 
-        num_new_features_to_replace = self.replacement_rate*eligible_feature_indices.shape[0]
-        self.accumulated_num_features_to_replace += num_new_features_to_replace
-        if self.accumulated_num_features_to_replace < 1:    return features_to_replace
+        num_new_features_to_replace = self.replacement_rate * eligible_feature_indices.shape[0]
 
-        num_new_features_to_replace = int(self.accumulated_num_features_to_replace)
-        self.accumulated_num_features_to_replace -= num_new_features_to_replace
+        if self.accumulate:
+            # Accumulate replacement counts over time
+            self.accumulated_num_features_to_replace += num_new_features_to_replace
+            if self.accumulated_num_features_to_replace < 1:
+                return features_to_replace
+            num_new_features_to_replace = int(self.accumulated_num_features_to_replace)
+            self.accumulated_num_features_to_replace -= num_new_features_to_replace
+        else:
+            # Non-accumulating mode: use probabilistic replacement
+            if num_new_features_to_replace < 1:
+                num_new_features_to_replace = 1 if torch.rand(1) <= num_new_features_to_replace else 0
+            else:
+                num_new_features_to_replace = int(num_new_features_to_replace)
+            if num_new_features_to_replace == 0:
+                return features_to_replace
         """
         Find features with smallest utility
         """
@@ -167,32 +198,37 @@ class CBPLinear(nn.Module):
         try:
             # Log to CBPLogger if available
             if hasattr(self, 'cbp_logger') and self.cbp_logger is not None:
-                layer_name = getattr(self, 'layer_name', 'MPN')
-                
+                layer_name = getattr(self, 'layer_name', f'{self.layer_type}_layer')
+
                 stats = {
                     'total_neurons_replaced': int(num_features_to_replace),
                     'layer_replacements': [int(num_features_to_replace)],
                     'replaced_neuron_indices': [features_to_replace.detach().cpu().tolist()],
                     'layer_names': [layer_name],
                 }
-                
+
                 # Initialize batch counter if needed
                 if not hasattr(self, '_batch_counter'):
                     self._batch_counter = 0
                 self._batch_counter += 1
-                
+
                 # Log batch statistics
-                self.cbp_logger.log_batch_stats(self._batch_counter, stats, layer_type="MPN")
+                self.cbp_logger.log_batch_stats(self._batch_counter, stats, layer_type=self.layer_type)
             
             # Store stats in trainer's buffer for epoch aggregation
-            if hasattr(self, '_trainer') and hasattr(self._trainer, 'mpn_stats_buffer'):
-                layer_name = getattr(self, 'layer_name', 'MPN')
-                mpn_stats = {
+            if hasattr(self, '_trainer'):
+                layer_name = getattr(self, 'layer_name', f'{self.layer_type}_layer')
+                stats = {
                     'layer_name': layer_name,
                     'replaced_indices': features_to_replace.detach().cpu().tolist(),
-                    'num_replaced': int(num_features_to_replace)
+                    'num_replaced': int(num_features_to_replace),
+                    'layer_type': self.layer_type
                 }
-                self._trainer.mpn_stats_buffer.append(mpn_stats)
+                # Use appropriate buffer based on layer type
+                if self.layer_type == 'FFN' and hasattr(self._trainer, 'ffn_stats_buffer'):
+                    self._trainer.ffn_stats_buffer.append(stats)
+                elif self.layer_type == 'MPN' and hasattr(self._trainer, 'mpn_stats_buffer'):
+                    self._trainer.mpn_stats_buffer.append(stats)
                 
         except Exception:
             # Silently handle any logging errors to avoid disrupting training

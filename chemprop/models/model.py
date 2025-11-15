@@ -6,52 +6,126 @@ import torch
 import torch.nn as nn
 
 from .mpn import MPN
+from .cbp_linear import CBPLinear
 from chemprop.args import TrainArgs
 from chemprop.features import BatchMolGraph
 from chemprop.nn_utils import get_activation_function, initialize_weights
 
 
 class FFNNetworkCBP(nn.Module):
-    """A feed-forward neural network that tracks intermediate activations for CBP."""
-    
-    def __init__(self, layers: nn.Sequential):
+    """A feed-forward neural network with CBPLinear layers for continual backpropagation."""
+
+    def __init__(self, layers: nn.Sequential, enable_cbp: bool = False, cbp_params: dict = None):
         super(FFNNetworkCBP, self).__init__()
-        self.layers = layers
-        
+        self.enable_cbp = enable_cbp
+        self.cbp_params = cbp_params or {}
+
+        # Extract linear layers and build new structure with CBPLinear
+        if enable_cbp and cbp_params:
+            self.layers, self.cbp_layers = self._build_cbp_structure(layers)
+        else:
+            # Keep original structure for backward compatibility
+            self.layers = layers
+            self.cbp_layers = []
+
+    def _build_cbp_structure(self, original_layers):
+        """Build FFN structure with CBPLinear layers between linear layers."""
+        new_layers = nn.ModuleList()
+        cbp_layers = nn.ModuleList()
+        linear_layers = []
+        linear_indices = []
+
+        # First pass: identify all linear layers
+        for i, layer in enumerate(original_layers):
+            if isinstance(layer, nn.Linear):
+                linear_layers.append(layer)
+                linear_indices.append(i)
+
+        # Second pass: reconstruct with CBPLinear
+        layer_counter = 0
+        for i, layer in enumerate(original_layers):
+            new_layers.append(layer)
+
+            # After each Linear layer (except the last), add CBPLinear
+            if isinstance(layer, nn.Linear) and layer_counter < len(linear_layers) - 1:
+                # Find the next linear layer
+                next_linear = linear_layers[layer_counter + 1]
+
+                # Create CBPLinear
+                cbp_layer = CBPLinear(
+                    in_layer=layer,
+                    out_layer=next_linear,
+                    layer_type='FFN',
+                    layer_name=f'FFN_Layer{layer_counter}',
+                    **self.cbp_params
+                )
+                cbp_layers.append(cbp_layer)
+                new_layers.append(cbp_layer)
+
+                layer_counter += 1
+
+        return new_layers, cbp_layers
+
     def predict(self, x: torch.Tensor):
         """
         Forward pass that returns both output and intermediate features.
-        
+
         :param x: Input tensor
         :return: Output and list of intermediate activations
         """
         features = []
         h = x
-        
-        # Process through layers and collect activations
-        i = 0
-        while i < len(self.layers):
-            layer = self.layers[i]
-            
-            if isinstance(layer, nn.Linear):
-                h = layer(h)
-                # Check if next layer is activation
-                if i + 1 < len(self.layers):
-                    next_layer = self.layers[i + 1]
-                    if isinstance(next_layer, (nn.ReLU, nn.ELU, nn.SELU, nn.Tanh, nn.LeakyReLU, nn.PReLU)):
-                        i += 1  # Skip to activation
-                        h = next_layer(h)
-                        features.append(h)
-            else:
-                h = layer(h)
-            
-            i += 1
-        
+
+        if self.enable_cbp and self.cbp_params:
+            # Process through layers and collect activations after each hidden layer
+            for layer in self.layers:
+                if isinstance(layer, CBPLinear):
+                    # CBPLinear is a pass-through, but we can collect features here
+                    h = layer(h)
+                elif isinstance(layer, nn.Linear):
+                    h = layer(h)
+                elif isinstance(layer, (nn.ReLU, nn.ELU, nn.SELU, nn.Tanh, nn.LeakyReLU, nn.PReLU)):
+                    h = layer(h)
+                    # Collect features after activation
+                    features.append(h)
+                else:
+                    h = layer(h)
+        else:
+            # Original behavior for backward compatibility
+            i = 0
+            while i < len(self.layers):
+                layer = self.layers[i]
+
+                if isinstance(layer, nn.Linear):
+                    h = layer(h)
+                    # Check if next layer is activation
+                    if i + 1 < len(self.layers):
+                        next_layer = self.layers[i + 1]
+                        if isinstance(next_layer, (nn.ReLU, nn.ELU, nn.SELU, nn.Tanh, nn.LeakyReLU, nn.PReLU)):
+                            i += 1  # Skip to activation
+                            h = next_layer(h)
+                            features.append(h)
+                else:
+                    h = layer(h)
+
+                i += 1
+
         return h, features
-    
+
     def forward(self, x: torch.Tensor):
         """Standard forward pass."""
-        return self.layers(x)
+        if self.enable_cbp and self.cbp_params:
+            # Process through new structure
+            for layer in self.layers:
+                x = layer(x)
+            return x
+        else:
+            # Original behavior
+            return self.layers(x)
+
+    def get_cbp_layers(self):
+        """Return all CBPLinear layers in the network."""
+        return list(self.cbp_layers)
 
 
 class MoleculeModel(nn.Module):
@@ -185,7 +259,17 @@ class MoleculeModel(nn.Module):
         # Create FFN model - use CBP wrapper if CBP is enabled
         sequential = nn.Sequential(*ffn)
         if self.use_cbp:
-            self.ffn = FFNNetworkCBP(sequential)
+            # Prepare CBP parameters for FFN layers
+            cbp_params = {
+                'replacement_rate': getattr(args, 'cbp_replacement_rate', 1e-4),
+                'maturity_threshold': getattr(args, 'cbp_maturity_threshold', 100),
+                'decay_rate': getattr(args, 'cbp_decay_rate', 0.99),
+                'util_type': getattr(args, 'cbp_util_type', 'contribution'),
+                'accumulate': getattr(args, 'cbp_accumulate', True),
+                'init': getattr(args, 'cbp_init', 'kaiming'),
+                'act_type': args.activation.lower() if args.activation else 'relu'
+            }
+            self.ffn = FFNNetworkCBP(sequential, enable_cbp=True, cbp_params=cbp_params)
         else:
             self.ffn = sequential
 
@@ -345,6 +429,33 @@ class MoleculeModel(nn.Module):
             output = nn.functional.softplus(output) + 1
 
         return output
+
+    def get_all_cbp_layers(self):
+        """Collect all CBPLinear layers from both MPN and FFN."""
+        cbp_layers = []
+
+        # Collect from FFN
+        if hasattr(self.ffn, 'get_cbp_layers'):
+            cbp_layers.extend(self.ffn.get_cbp_layers())
+
+        # Collect from MPN encoders
+        if hasattr(self.encoder, 'encoder'):
+            # Handle both single encoder and ModuleList of encoders
+            encoders = self.encoder.encoder if isinstance(self.encoder.encoder, nn.ModuleList) else [self.encoder.encoder]
+
+            for encoder in encoders:
+                # Check for CBPLinear layers in each encoder
+                for name, module in encoder.named_modules():
+                    if isinstance(module, CBPLinear):
+                        cbp_layers.append(module)
+
+        # Also check reaction solvent encoder if present
+        if hasattr(self.encoder, 'encoder_solvent'):
+            for name, module in self.encoder.encoder_solvent.named_modules():
+                if isinstance(module, CBPLinear):
+                    cbp_layers.append(module)
+
+        return cbp_layers
 
 
 # Create an alias for backward compatibility
