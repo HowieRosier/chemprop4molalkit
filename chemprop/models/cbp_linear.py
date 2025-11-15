@@ -9,6 +9,8 @@ def call_reinit(m, i, o):
 
 
 def log_features(m, i, o):
+    if not m.training:
+        return
     with torch.no_grad():
         m.util.data *= m.decay_rate
         output_weight_mag = m.out_layer.weight.data.abs().mean(dim=0)
