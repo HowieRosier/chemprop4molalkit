@@ -39,7 +39,6 @@ class ContinualBackpropTrainer:
         accumulate: bool = True,
         enable_cbp_logging: bool = True,
         log_dir: str = None,
-        use_adamgnt: bool = False,
         enable_gradient_logging: bool = False,
         gradient_log_frequency: int = 100,
         enable_wandb: bool = False,
@@ -97,20 +96,16 @@ class ContinualBackpropTrainer:
             if enable_wandb:
                 print(f"📈 WandB integration enabled - project: {wandb_project}")
 
-        # Setup optimizer
-        if use_adamgnt:
+        # Setup optimizer - Always use AdamGnT for CBP mode
+        # AdamGnT uses per-element step counters which is better for neuron replacement
+        if args.optimizer == 'adam':
             self.optimizer = AdamGnT(
-                model.parameters(),
-                lr=step_size,
-                weight_decay=args.weight_decay
-            )
-        elif args.optimizer == 'adam':
-            self.optimizer = Adam(
                 model.parameters(),
                 lr=step_size,
                 betas=(0.9, 0.999),
                 weight_decay=args.weight_decay
             )
+            print("🚀 Using AdamGnT optimizer for CBP training (per-element step counters)")
         else:
             self.optimizer = SGD(
                 model.parameters(),
@@ -118,6 +113,11 @@ class ContinualBackpropTrainer:
                 momentum=0.9,
                 weight_decay=args.weight_decay
             )
+            print("📈 Using SGD optimizer for CBP training")
+
+        # Pass optimizer reference to CBP layers for AdamGnT step counter reset
+        for cbp_layer in self.cbp_layers:
+            cbp_layer._optimizer_ref = self.optimizer
 
     def _configure_cbp_layers(self, replacement_rate, decay_rate, maturity_threshold, util_type, accumulate):
         """Configure all CBPLinear layers with unified parameters."""
@@ -128,6 +128,8 @@ class ContinualBackpropTrainer:
             cbp_layer.maturity_threshold = maturity_threshold
             cbp_layer.util_type = util_type
             cbp_layer.accumulate = accumulate
+
+            # Note: optimizer reference will be set after optimizer is created
 
             # Set layer name if not already set
             if not hasattr(cbp_layer, 'layer_name') or cbp_layer.layer_name is None:

@@ -1,9 +1,14 @@
 """
-AdamGnT: Adam optimizer variant for Generate-and-Test
-======================================================
-This optimizer uses per-parameter element step counters rather than per-parameter group,
-which is useful for continual learning scenarios where different parameters may be
-updated at different rates.
+AdamGnT: AdamW variant with per-element step counters for Generate-and-Test
+============================================================================
+This optimizer combines:
+1. AdamW's decoupled weight decay (more suitable for adaptive optimizers)
+2. Per-parameter element step counters (better for neuron replacement in CBP)
+
+Key features:
+- Weight decay is applied directly to parameters, not to gradients
+- Each parameter element has its own step counter
+- New neurons (after replacement) start with step=0 for larger initial learning rate
 """
 
 import torch
@@ -11,10 +16,10 @@ from torch.optim.optimizer import Optimizer
 
 
 class AdamGnT(Optimizer):
-    r"""Implements Adam algorithm for generate-and-test.
+    r"""Implements AdamW algorithm with per-element step counters for generate-and-test.
 
-    It is a modification of `Adam: A Method for Stochastic Optimization`_.
-    The key difference is that step counters are per-parameter element rather than per-parameter group.
+    Combines AdamW's decoupled weight decay with per-element step counters,
+    making it ideal for continual learning with neuron replacement (CBP).
 
     Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -90,8 +95,8 @@ class AdamGnT(Optimizer):
 
                 state['step'] += 1
 
-                if group['weight_decay'] != 0:
-                    grad.add_(p.data, alpha=group['weight_decay'])
+                # Note: Removed L2 regularization from gradient
+                # Weight decay will be applied directly to parameters (AdamW style)
 
                 # Decay the first and second moment running average coefficient
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
@@ -108,10 +113,16 @@ class AdamGnT(Optimizer):
                 bias_correction1 = 1 - beta1 ** state['step']
                 bias_correction2 = 1 - beta2 ** state['step']
 
-                # Calculate bias-corrected step size
+                # Calculate bias-corrected step size (per-element)
                 step_size = group['lr'] * (bias_correction2.sqrt() / bias_correction1)
 
                 # Standard Adam parameter update: p = p - step_size * exp_avg / denom
-                p.data.addcdiv_(exp_avg, denom, value=-step_size)
+                # Since step_size is now a tensor, we need to use element-wise operations
+                p.data.add_(-(step_size * exp_avg / denom))
+
+                # Apply decoupled weight decay (AdamW style)
+                # This is applied after the gradient update, directly to parameters
+                if group['weight_decay'] != 0:
+                    p.data.mul_(1 - group['lr'] * group['weight_decay'])
 
         return loss

@@ -232,6 +232,38 @@ class CBPLinear(nn.Module):
             self.ages[features_to_replace] = 0
 
             """
+            Reset AdamGnT step counters for replaced neurons (if using AdamGnT)
+            """
+            # Access optimizer through the model's trainer if available
+            if hasattr(self, '_optimizer_ref'):
+                optimizer = self._optimizer_ref
+                from ..models.AdamGnT import AdamGnT
+                if isinstance(optimizer, AdamGnT):
+                    # Reset step counters for replaced parameters
+                    for param in [self.in_layer.weight, self.out_layer.weight]:
+                        if param in optimizer.state:
+                            state = optimizer.state[param]
+                            if 'step' in state and isinstance(state['step'], torch.Tensor):
+                                # Reset step counters for replaced neurons
+                                if param is self.in_layer.weight:
+                                    # Input weights: reset rows corresponding to replaced features
+                                    state['step'][features_to_replace - self.add_in_dim, :] = 0
+                                elif param is self.out_layer.weight:
+                                    # Output weights: reset columns corresponding to replaced features
+                                    state['step'][:, features_to_replace] = 0
+                                # Also reset momentum buffers
+                                if 'exp_avg' in state:
+                                    if param is self.in_layer.weight:
+                                        state['exp_avg'][features_to_replace - self.add_in_dim, :] = 0
+                                    elif param is self.out_layer.weight:
+                                        state['exp_avg'][:, features_to_replace] = 0
+                                if 'exp_avg_sq' in state:
+                                    if param is self.in_layer.weight:
+                                        state['exp_avg_sq'][features_to_replace - self.add_in_dim, :] = 0
+                                    elif param is self.out_layer.weight:
+                                        state['exp_avg_sq'][:, features_to_replace] = 0
+
+            """
             Reset the corresponding batchnorm/layernorm layers
             """
             if self.bn_layer is not None:
