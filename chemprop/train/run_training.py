@@ -358,7 +358,9 @@ def run_training(args: TrainArgs,
                 decay_rate=args.decay_rate,
                 maturity_threshold=args.maturity_threshold,
                 util_type=args.util_type,
-                accumulate=False,
+                accumulate=True,
+                log_dir=cbp_log_dir,  # Add log directory
+                enable_cbp_logging=True,  # Enable CBP logging
                 enable_gradient_logging=args.enable_gradient_logging,  # From command line args
                 gradient_log_frequency=args.gradient_log_frequency,  # From command line args
             )

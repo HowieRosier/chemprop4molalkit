@@ -261,13 +261,15 @@ class MoleculeModel(nn.Module):
         if self.use_cbp:
             # Prepare CBP parameters for FFN layers
             cbp_params = {
-                'replacement_rate': getattr(args, 'cbp_replacement_rate', 1e-4),
-                'maturity_threshold': getattr(args, 'cbp_maturity_threshold', 100),
-                'decay_rate': getattr(args, 'cbp_decay_rate', 0.99),
-                'util_type': getattr(args, 'cbp_util_type', 'contribution'),
-                'accumulate': getattr(args, 'cbp_accumulate', True),
+                'replacement_rate': getattr(args, 'replacement_rate', 1e-4),
+                'maturity_threshold': getattr(args, 'maturity_threshold', 100),
+                'decay_rate': getattr(args, 'decay_rate', 0.99),
+                'util_type': getattr(args, 'util_type', 'contribution'),
+                'accumulate': getattr(args, 'accumulate', True),
                 'init': getattr(args, 'cbp_init', 'kaiming'),
-                'act_type': args.activation.lower() if args.activation else 'relu'
+                'act_type': args.activation.lower() if args.activation else 'relu',
+                'grad_log_frequency': getattr(args, 'gradient_log_frequency', 1000000),
+                'cbp_logger': None  # Will be set by ContinualBackpropTrainer
             }
             self.ffn = FFNNetworkCBP(sequential, enable_cbp=True, cbp_params=cbp_params)
         else:

@@ -14,9 +14,7 @@ Key simplifications from the original implementation:
 from typing import Dict, Callable, Optional
 import torch
 import torch.nn as nn
-from torch.optim import SGD, Adam
-import json
-from datetime import datetime
+from torch.optim import SGD
 
 from chemprop.models.model import MoleculeModel
 from chemprop.models.AdamGnT import AdamGnT
@@ -39,8 +37,8 @@ class ContinualBackpropTrainer:
         accumulate: bool = True,
         enable_cbp_logging: bool = True,
         log_dir: str = None,
-        enable_gradient_logging: bool = False,
-        gradient_log_frequency: int = 100,
+        enable_gradient_logging: bool = True,
+        gradient_log_frequency: int = 1000000,
         enable_wandb: bool = False,
         wandb_project: str = "cbp-training",
         wandb_entity: Optional[str] = None,
@@ -49,10 +47,16 @@ class ContinualBackpropTrainer:
         self.args = args
         self.device = args.device
 
+        # Store CBP parameters
+        self.replacement_rate = replacement_rate
+        self.decay_rate = decay_rate
+        self.maturity_threshold = maturity_threshold
+        self.util_type = util_type
+        self.accumulate = accumulate
+
         # Collect all CBPLinear layers - if model doesn't have the method, CBP might not be enabled
         if hasattr(model, 'get_all_cbp_layers'):
             self.cbp_layers = model.get_all_cbp_layers()
-            print(f"🔥 Found {len(self.cbp_layers)} CBPLinear layers in the model")
 
             # Configure CBP parameters
             self._configure_cbp_layers(
@@ -144,13 +148,25 @@ class ContinualBackpropTrainer:
             cbp_layer._batch_counter = 0
             cbp_layer.current_epoch = 0
 
-            # Register gradient logging hook if not already registered
-            if self.enable_gradient_logging and cbp_layer.cbp_logger is not None:
+            # Register gradient logging hook if gradient logging is enabled
+            if self.enable_gradient_logging:
                 # Import the log_gradients function from cbp_linear
                 from .cbp_linear import log_gradients
-                # Register the hook if not already done
-                if not any(isinstance(h, type(log_gradients)) for h in cbp_layer._backward_hooks.values() if hasattr(cbp_layer, '_backward_hooks')):
-                    cbp_layer.register_full_backward_hook(log_gradients)
+                # Register the hook - we need to do this here because the logger
+                # wasn't available when the CBPLinear layer was initialized
+                # Remove any existing gradient hooks first to avoid duplicates
+                if hasattr(cbp_layer, '_backward_hooks'):
+                    # Create a list of hook ids to remove (can't modify dict during iteration)
+                    hooks_to_remove = []
+                    for hook_id, hook in cbp_layer._backward_hooks.items():
+                        if hook.__name__ == 'log_gradients':
+                            hooks_to_remove.append(hook_id)
+                    # Remove the old hooks
+                    for hook_id in hooks_to_remove:
+                        del cbp_layer._backward_hooks[hook_id]
+
+                # Register the new hook
+                cbp_layer.register_full_backward_hook(log_gradients)
 
     def train_step(self,
                    batch_data: Dict = None,
@@ -197,7 +213,7 @@ class ContinualBackpropTrainer:
         # Get arguments for loss calculation
         args = self.args
 
-        # 🔥 Complete loss function handling logic from original train.py
+        # Complete loss function handling logic from original train.py
         if loss_func is None:
             if args.dataset_type == 'classification':
                 if args.loss_function == 'binary_cross_entropy':
@@ -251,7 +267,7 @@ class ContinualBackpropTrainer:
             batch_data['bond_features_batch']
         )
 
-        # Move tensors to correct device - 🔥 Keep original device transfer logic
+        # Move tensors to correct device
         torch_device = preds.device
         mask = mask.to(torch_device)
         targets = targets.to(torch_device)
@@ -262,7 +278,7 @@ class ContinualBackpropTrainer:
         if gt_targets is not None:
             gt_targets = gt_targets.to(torch_device)
 
-        # 🔥 Complete loss function handling logic - identical to original train.py
+        # Complete loss function handling logic - identical to original train.py
         if args.loss_function == 'mcc' and args.dataset_type == 'classification':
             loss = loss_func(preds, targets, data_weights, mask) * target_weights.squeeze(0)
         elif args.loss_function == 'mcc': # multiclass dataset type
@@ -295,18 +311,17 @@ class ContinualBackpropTrainer:
 
         loss = loss.sum() / mask.sum()
 
-        # 🔥 Standard backpropagation step
+        # Standard backpropagation step
         self.optimizer.zero_grad()
         loss.backward()
 
-        # 🔥 Keep gradient clipping feature
+        # Gradient clipping if enabled
         if args.grad_clip:
             nn.utils.clip_grad_norm_(self.model.parameters(), args.grad_clip)
 
         self.optimizer.step()
 
-        # 🔥 CBPLinear layers handle neuron replacement automatically through their hooks
-        # No need for manual GnT step - the backward hooks trigger replacement
+        # CBPLinear layers handle neuron replacement automatically through their hooks
 
         # Log training metrics
         if self.cbp_logger:
@@ -318,29 +333,84 @@ class ContinualBackpropTrainer:
 
         return loss.item()
 
-    # Note: Batch-level logging is now handled directly by CBPLinear layers
-    # through their _log_replacement_stats method
-
     def log_epoch_cbp_stats(self, epoch: int):
         """Update epoch information and save epoch summary."""
+        import numpy as np
+
         # Update epoch for all CBP layers
         for cbp_layer in self.cbp_layers:
             cbp_layer.current_epoch = epoch
 
-        # Save epoch summary using unified CBP logger
-        if self.cbp_logger:
-            self.cbp_logger.save_epoch_summary(epoch)
+        # Calculate and log CBP-specific statistics
+        if self.cbp_logger and self.cbp_layers:
+            # Collect statistics from all CBP layers
+            total_ages = []
+            mature_count = 0
+            total_neurons = 0
 
-            # Log CBP-specific statistics
+            for cbp_layer in self.cbp_layers:
+                # Get ages as numpy array
+                ages = cbp_layer.ages.detach().cpu().numpy() if torch.is_tensor(cbp_layer.ages) else cbp_layer.ages
+                total_ages.extend(ages)
+
+                # Count mature neurons (age > maturity_threshold)
+                mature_count += np.sum(ages > cbp_layer.maturity_threshold)
+                total_neurons += len(ages)
+
+            # Calculate average age
+            avg_age = float(np.mean(total_ages)) if total_ages else 0.0
+
+            # Get total replacements for this epoch
             total_replacements = self.cbp_logger.get_total_replacements()
-            if total_replacements > 0:
-                self.cbp_logger.log_cbp_stats(
-                    replacement_count=total_replacements,
+
+            # Force log final gradient/utility/activation data at epoch end
+            for cbp_layer in self.cbp_layers:
+                # Get current batch counter
+                batch_idx = getattr(cbp_layer, '_forward_log_counter', 0)
+                if batch_idx == 0:
+                    batch_idx = getattr(cbp_layer, '_grad_log_counter', 0)
+
+                # Get gradient magnitude
+                grad_magnitude = torch.zeros_like(cbp_layer.util)
+                if hasattr(cbp_layer.out_layer.weight, 'grad') and cbp_layer.out_layer.weight.grad is not None:
+                    grad_magnitude = cbp_layer.out_layer.weight.grad.abs().mean(dim=0)
+
+                # Log final state of this epoch
+                self.cbp_logger.log_gradients(
+                    layer_name=cbp_layer.layer_name,
+                    gradients=grad_magnitude,
+                    utilities=cbp_layer.util,
+                    ages=cbp_layer.ages,
+                    batch_idx=batch_idx,
                     epoch=epoch
                 )
 
-    # Simplified aggregation methods are no longer needed since we aggregate directly
-    # in log_epoch_cbp_stats. The CBPLinear layers handle their own statistics.
+                # Also log final activations (using utility as proxy if no activations available)
+                self.cbp_logger.log_activations(
+                    layer_name=cbp_layer.layer_name,
+                    activations=cbp_layer.util,  # Use utility as a proxy for neuron importance
+                    batch_idx=batch_idx,
+                    epoch=epoch
+                )
+
+            # Log complete CBP statistics
+            self.cbp_logger.log_cbp_stats(
+                replacement_count=total_replacements,
+                replacement_rate=self.replacement_rate,  # Use the configured replacement rate
+                avg_neuron_age=avg_age,
+                mature_neurons=int(mature_count),
+                epoch=epoch
+            )
+
+            # Save epoch summary after logging stats
+            self.cbp_logger.save_epoch_summary(epoch)
+
+            # Print summary for debugging
+            print(f"📊 Epoch {epoch} CBP Stats - Replacements: {total_replacements}, "
+                  f"Avg Age: {avg_age:.2f}, Mature: {mature_count}/{total_neurons}")
+        elif self.cbp_logger:
+            # Still save summary even if no CBP layers
+            self.cbp_logger.save_epoch_summary(epoch)
 
     def save_cbp_summary(self):
         """Save CBP training summary and close logger."""

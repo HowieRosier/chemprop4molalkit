@@ -50,16 +50,40 @@ class CBPLogger:
         self.log_frequency = log_frequency
         self.track_histogram = track_histogram
 
+        # Initialize log file with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file_path = self.log_dir / f"cbp_training_{timestamp}.log"
+        self.log_file = None
+        self._open_log_file()
+
         # Initialize counters
         self.batch_counter = 0
         self.epoch_counter = 0
         self.total_replacements = 0
 
-        # Storage for raw data (no statistics, user will analyze)
+        # Epoch tracking for summary
+        self.epoch_batch_count = 0
+        self.epoch_active_batches = 0
+        self.epoch_replacements_by_layer = {}  # Track replacements per layer per epoch
+
+        # Storage for raw data
         self.gradient_history = {}  # Layer -> batch -> raw gradients
         self.utility_history = {}   # Layer -> batch -> raw utilities
         self.age_history = {}       # Layer -> batch -> raw ages
         self.replacement_history = {}  # Layer -> replacement events
+
+        # Current epoch data for per-epoch storage
+        self.current_epoch_data = {
+            'gradients': {},  # Layer -> list of gradient snapshots
+            'utilities': {},  # Layer -> list of utility snapshots
+            'activations': {}  # Layer -> list of activation snapshots
+        }
+
+        # All epochs data for consolidated storage
+        self.all_epochs_data = []
+
+        # Final epoch data for separate log
+        self.final_epoch_data = None
 
         # CBP training statistics (from cbp_trainer)
         self.cbp_stats = {
@@ -95,6 +119,29 @@ class CBPLogger:
                 print("Warning: wandb not installed. Install with 'pip install wandb'")
                 self.wandb = None
 
+    def _open_log_file(self):
+        """Open the log file for writing."""
+        try:
+            self.log_file = open(self.log_file_path, 'w', buffering=1)  # Line buffering
+            self._write_log_header()
+        except Exception as e:
+            print(f"Warning: Could not open log file {self.log_file_path}: {e}")
+            self.log_file = None
+
+    def _write_log_header(self):
+        """Write the header information to the log file."""
+        if self.log_file:
+            self.log_file.write(f"CBP Training Log - Started at {datetime.now().isoformat()}\n")
+            self.log_file.write("=" * 60 + "\n")
+            self.log_file.write("This log tracks neuron replacement events during CBP training\n")
+            self.log_file.write("=" * 60 + "\n\n")
+
+    def _write_to_log(self, message: str):
+        """Write a message to the log file."""
+        if self.log_file:
+            self.log_file.write(message)
+            self.log_file.flush()
+
     def log_gradients(self,
                      layer_name: str,
                      gradients: torch.Tensor,
@@ -116,6 +163,10 @@ class CBPLogger:
         self.batch_counter = batch_idx
         self.epoch_counter = epoch
 
+        # Track batch count for epoch
+        if batch_idx > self.epoch_batch_count:
+            self.epoch_batch_count = batch_idx
+
         # Convert to CPU and numpy for storage
         grad_np = gradients.detach().cpu().numpy() if torch.is_tensor(gradients) else gradients
         util_np = utilities.detach().cpu().numpy() if torch.is_tensor(utilities) else utilities
@@ -127,7 +178,7 @@ class CBPLogger:
             self.utility_history[layer_name] = []
             self.age_history[layer_name] = []
 
-        # Store raw values only (user will analyze)
+        # Store raw values only
         self.gradient_history[layer_name].append({
             'batch': batch_idx,
             'epoch': epoch,
@@ -146,9 +197,50 @@ class CBPLogger:
             'values': age_np.tolist()  # Store all raw values
         })
 
-        # Log to W&B if enabled (compute statistics only for visualization)
+        # Also store in current epoch data
+        if layer_name not in self.current_epoch_data['gradients']:
+            self.current_epoch_data['gradients'][layer_name] = []
+            self.current_epoch_data['utilities'][layer_name] = []
+
+        self.current_epoch_data['gradients'][layer_name].append({
+            'batch': batch_idx,
+            'values': grad_np.tolist()
+        })
+
+        self.current_epoch_data['utilities'][layer_name].append({
+            'batch': batch_idx,
+            'values': util_np.tolist()
+        })
+
+        # Log to W&B if enabled
         if self.wandb and batch_idx % self.log_frequency == 0:
             self._log_to_wandb(layer_name, grad_np, util_np, age_np)
+
+    def log_activations(self,
+                       layer_name: str,
+                       activations: torch.Tensor,
+                       batch_idx: int,
+                       epoch: int):
+        """
+        Log activation values for a specific layer.
+
+        Args:
+            layer_name: Name of the layer
+            activations: Tensor of activation values
+            batch_idx: Current batch index
+            epoch: Current epoch
+        """
+        # Convert to CPU and numpy for storage
+        act_np = activations.detach().cpu().numpy() if torch.is_tensor(activations) else activations
+
+        # Store in current epoch data
+        if layer_name not in self.current_epoch_data['activations']:
+            self.current_epoch_data['activations'][layer_name] = []
+
+        self.current_epoch_data['activations'][layer_name].append({
+            'batch': batch_idx,
+            'values': act_np.tolist()
+        })
 
     def log_replacement_event(self,
                             layer_name: str,
@@ -169,9 +261,12 @@ class CBPLogger:
         if layer_name not in self.replacement_history:
             self.replacement_history[layer_name] = []
 
+        batch_id = batch_idx or self.batch_counter
+        epoch_id = epoch or self.epoch_counter
+
         event = {
-            'batch': batch_idx or self.batch_counter,
-            'epoch': epoch or self.epoch_counter,
+            'batch': batch_id,
+            'epoch': epoch_id,
             'indices': replaced_indices,
             'count': len(replaced_indices),
             'rate': replacement_rate,
@@ -181,6 +276,15 @@ class CBPLogger:
         self.replacement_history[layer_name].append(event)
         self.total_replacements += len(replaced_indices)
 
+        # Track epoch-level replacements
+        if layer_name not in self.epoch_replacements_by_layer:
+            self.epoch_replacements_by_layer[layer_name] = []
+        self.epoch_replacements_by_layer[layer_name].extend(replaced_indices)
+
+        # Write to log file if replacements occurred
+        if len(replaced_indices) > 0:
+            self._log_batch_replacement(batch_id, layer_name, replaced_indices, epoch_id)
+
         # Log to W&B
         if self.wandb:
             self.wandb.log({
@@ -188,6 +292,122 @@ class CBPLogger:
                 f"{layer_name}/replacement_rate": replacement_rate,
                 "total_replacements": self.total_replacements
             })
+
+    def _log_batch_replacement(self, batch_id: int, layer_name: str, indices: List[int], epoch: int):
+        """Write batch-level replacement event to log file."""
+        if not self.log_file:
+            return
+
+        # Increment active batch count for this epoch
+        self.epoch_active_batches += 1
+
+        # Determine layer type (FFN or MPN)
+        layer_type = "[FFN]" if "FFN" in layer_name else "[MPN]"
+
+        # Format timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Write batch header
+        message = f"\nBatch {batch_id} ({timestamp})\n"
+        message += f"  {layer_type} {len(indices)} neurons replaced\n"
+        message += f"  └─ {layer_name}: {indices}\n"
+
+        self._write_to_log(message)
+
+    def _write_epoch_summary_to_log(self, epoch: int, summary: dict):
+        """Write epoch summary to log file."""
+        if not self.log_file:
+            return
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Create the epoch summary header
+        message = "\n" + "=" * 60 + "\n"
+        message += f"EPOCH {epoch} SUMMARY - {timestamp}\n"
+        message += "=" * 60 + "\n"
+
+        # Get epoch-specific replacement count
+        epoch_replacement_count = 0
+        if summary['cbp_stats']['replacement_count'] is not None:
+            epoch_replacement_count = summary['cbp_stats']['replacement_count']
+
+        message += f"🔥 Total neurons replaced this epoch: {epoch_replacement_count}\n"
+
+        # Layer-wise replacements
+        layer_replacements = {}
+        for layer_name, events in self.replacement_history.items():
+            epoch_events = [e for e in events if e['epoch'] == epoch]
+            if epoch_events:
+                total_for_layer = sum(e['count'] for e in epoch_events)
+                layer_replacements[layer_name] = total_for_layer
+
+        if layer_replacements:
+            message += f"Layer-wise replacements: {layer_replacements}\n"
+
+        # Average replacement rates
+        if summary['cbp_stats']['replacement_rate'] is not None:
+            message += f"Average replacement rate: {summary['cbp_stats']['replacement_rate']:.6f}\n"
+
+        # Average utilities - calculate from current data
+        if self.current_epoch_data['utilities']:
+            avg_utils = {}
+            for layer_name, util_data in self.current_epoch_data['utilities'].items():
+                if util_data and util_data[-1]['values']:  # Use last batch data
+                    avg_utils[layer_name] = np.mean(util_data[-1]['values'])
+            if avg_utils:
+                message += f"Average utilities: {{{', '.join([f'{k}: {v:.4f}' for k, v in avg_utils.items()])}}}\n"
+
+        # Age statistics
+        age_stats = {
+            'mean_age': summary['cbp_stats']['avg_neuron_age'],
+            'mature_neurons': summary['cbp_stats']['mature_neurons']
+        }
+        message += f"Age statistics: {age_stats}\n"
+
+        # Active batches (with replacements) vs total batches
+        message += f"Active batches (with replacements): {self.epoch_active_batches}\n"
+        message += f"Total batches processed: {self.batch_counter}\n"
+
+        # Replaced Neuron Indices Summary
+        message += "\n📍 Replaced Neuron Indices Summary:\n"
+
+        # Separate FFN and MPN layers
+        ffn_layers = {}
+        mpn_layers = {}
+
+        for layer_name, indices in self.epoch_replacements_by_layer.items():
+            if indices:  # Only include layers with replacements
+                unique_indices = sorted(list(set(indices)))  # Remove duplicates and sort
+                if "FFN" in layer_name:
+                    ffn_layers[layer_name] = unique_indices
+                else:
+                    mpn_layers[layer_name] = unique_indices
+
+        # Display FFN layers
+        if ffn_layers:
+            message += "  FFN Layers:\n"
+            for layer_name, indices in sorted(ffn_layers.items()):
+                # Truncate if too many indices
+                if len(indices) > 20:
+                    display_indices = str(indices[:20])[:-1] + ", ...]"
+                else:
+                    display_indices = str(indices)
+                message += f"    {layer_name}: {display_indices}\n"
+
+        # Display MPN layers
+        if mpn_layers:
+            message += "  MPN Layers:\n"
+            for layer_name, indices in sorted(mpn_layers.items()):
+                # Truncate if too many indices
+                if len(indices) > 20:
+                    display_indices = str(indices[:20])[:-1] + ", ...]"
+                else:
+                    display_indices = str(indices)
+                message += f"    {layer_name}: {display_indices}\n"
+
+        message += "=" * 60 + "\n"
+
+        self._write_to_log(message)
 
     def log_training_metrics(self,
                             loss: float = None,
@@ -316,50 +536,168 @@ class CBPLogger:
             })
 
     def save_epoch_summary(self, epoch: int):
-        """Save a lightweight summary of the epoch."""
-        summary_path = self.log_dir / f"epoch_{epoch}_summary.json"
-
+        """Save complete neuron-level data for the epoch."""
+        # Prepare the complete epoch data
         summary = {
             'epoch': epoch,
             'timestamp': datetime.now().isoformat(),
             'total_replacements': self.total_replacements,
-            'layers_tracked': list(self.gradient_history.keys()),
+            'layers_tracked': list(self.current_epoch_data['gradients'].keys()),
             'cbp_stats': {
                 'replacement_count': next((s['value'] for s in self.cbp_stats['replacement_count_per_epoch'] if s['epoch'] == epoch), None),
                 'replacement_rate': next((s['value'] for s in self.cbp_stats['replacement_rate_per_epoch'] if s['epoch'] == epoch), None),
                 'avg_neuron_age': next((s['value'] for s in self.cbp_stats['avg_neuron_age_per_epoch'] if s['epoch'] == epoch), None),
                 'mature_neurons': next((s['value'] for s in self.cbp_stats['mature_neurons_per_epoch'] if s['epoch'] == epoch), None)
+            },
+            # Add the complete neuron-level data for this epoch
+            'neuron_data': {
+                'gradients': self.current_epoch_data['gradients'],
+                'utilities': self.current_epoch_data['utilities'],
+                'activations': self.current_epoch_data['activations']
             }
         }
 
-        with open(summary_path, 'w') as f:
-            json.dump(summary, f, indent=2)
+        # Append to all epochs data
+        self.all_epochs_data.append(summary)
+
+        # Save consolidated epochs summary
+        epochs_summary_path = self.log_dir / "epochs_summary.json"
+        with open(epochs_summary_path, 'w') as f:
+            json.dump({
+                'total_epochs': epoch + 1,
+                'last_updated': datetime.now().isoformat(),
+                'epochs': self.all_epochs_data
+            }, f, indent=2)
+
+        # Write epoch summary to log file
+        self._write_epoch_summary_to_log(epoch, summary)
+
+        # Store final epoch data for potential final_epoch.log
+        self.final_epoch_data = summary.copy()
+
+        # Clear current epoch data for next epoch
+        self.reset_epoch_data()
+
+        # Reset epoch counters
+        self.epoch_batch_count = 0
+        self.epoch_active_batches = 0
+        self.epoch_replacements_by_layer = {}
 
         return summary
 
+    def reset_epoch_data(self):
+        """Reset current epoch data for the next epoch."""
+        self.current_epoch_data = {
+            'gradients': {},
+            'utilities': {},
+            'activations': {}
+        }
+
     def save_full_history(self):
-        """Save the complete CBP training history to disk."""
-        history_path = self.log_dir / f"cbp_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        """Save the complete CBP training summary to disk."""
+        # Generate timestamp for filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Limit gradient history to save space (keep last 1000 batches per layer)
-        limited_gradient_history = {}
-        for layer, history in self.gradient_history.items():
-            limited_gradient_history[layer] = history[-1000:] if len(history) > 1000 else history
+        # Save history at cbp_logs root level with timestamp
+        if 'iter_' in str(self.log_dir):
+            # If we're in an iter subdirectory, go up one level
+            history_path = self.log_dir.parent / f"cbp_training_summary_{timestamp}.json"
+        else:
+            history_path = self.log_dir / f"cbp_training_summary_{timestamp}.json"
 
-        history = {
-            'gradient_history': limited_gradient_history,
-            'utility_history': {k: v[-1000:] for k, v in self.utility_history.items()},
-            'age_history': {k: v[-1000:] for k, v in self.age_history.items()},
-            'replacement_history': self.replacement_history,
-            'cbp_stats': self.cbp_stats,
-            'training_metrics': self.training_metrics,
-            'total_replacements': self.total_replacements
+        # Create training summary section
+        training_summary = {
+            'total_epochs': self.epoch_counter + 1,
+            'total_replacements': self.total_replacements,
+            'layers_tracked': list(set(
+                list(self.gradient_history.keys()) +
+                list(self.utility_history.keys()) +
+                list(self.replacement_history.keys())
+            )),
+            'final_metrics': {
+                'loss': self.training_metrics['loss_history'][-1]['loss'] if self.training_metrics['loss_history'] else None,
+                'accuracy': self.training_metrics['accuracy_history'][-1]['accuracy'] if self.training_metrics['accuracy_history'] else None,
+                'auc': self.training_metrics['auc_history'][-1]['auc'] if self.training_metrics['auc_history'] else None
+            },
+            'cbp_statistics': {
+                'total_replacement_events': sum(len(events) for events in self.replacement_history.values()),
+                'avg_replacement_rate': np.mean([s['value'] for s in self.cbp_stats['replacement_rate_per_epoch']]) if self.cbp_stats['replacement_rate_per_epoch'] else 0,
+                'final_avg_neuron_age': self.cbp_stats['avg_neuron_age_per_epoch'][-1]['value'] if self.cbp_stats['avg_neuron_age_per_epoch'] else None,
+                'final_mature_neurons': self.cbp_stats['mature_neurons_per_epoch'][-1]['value'] if self.cbp_stats['mature_neurons_per_epoch'] else None
+            }
+        }
+
+        # Create detailed history section (per-epoch summaries without neuron-level data)
+        detailed_history = []
+        for epoch in range(self.epoch_counter + 1):
+            epoch_summary = {
+                'epoch': epoch,
+                'metrics': {},
+                'cbp_stats': {},
+                'replacement_events': {}
+            }
+
+            # Add training metrics for this epoch
+            for loss_entry in self.training_metrics['loss_history']:
+                if loss_entry['epoch'] == epoch:
+                    epoch_summary['metrics']['loss'] = loss_entry['loss']
+                    break
+
+            for acc_entry in self.training_metrics['accuracy_history']:
+                if acc_entry['epoch'] == epoch:
+                    epoch_summary['metrics']['accuracy'] = acc_entry['accuracy']
+                    break
+
+            for auc_entry in self.training_metrics['auc_history']:
+                if auc_entry['epoch'] == epoch:
+                    epoch_summary['metrics']['auc'] = auc_entry['auc']
+                    break
+
+            # Add CBP stats for this epoch
+            for stat_entry in self.cbp_stats['replacement_count_per_epoch']:
+                if stat_entry['epoch'] == epoch:
+                    epoch_summary['cbp_stats']['replacement_count'] = stat_entry['value']
+                    break
+
+            for stat_entry in self.cbp_stats['replacement_rate_per_epoch']:
+                if stat_entry['epoch'] == epoch:
+                    epoch_summary['cbp_stats']['replacement_rate'] = stat_entry['value']
+                    break
+
+            for stat_entry in self.cbp_stats['avg_neuron_age_per_epoch']:
+                if stat_entry['epoch'] == epoch:
+                    epoch_summary['cbp_stats']['avg_neuron_age'] = stat_entry['value']
+                    break
+
+            for stat_entry in self.cbp_stats['mature_neurons_per_epoch']:
+                if stat_entry['epoch'] == epoch:
+                    epoch_summary['cbp_stats']['mature_neurons'] = stat_entry['value']
+                    break
+
+            # Add replacement events summary for this epoch
+            for layer_name, events in self.replacement_history.items():
+                epoch_events = [e for e in events if e['epoch'] == epoch]
+                if epoch_events:
+                    epoch_summary['replacement_events'][layer_name] = {
+                        'total_replacements': sum(e['count'] for e in epoch_events),
+                        'num_events': len(epoch_events)
+                    }
+
+            # Only add if we have data for this epoch
+            if epoch_summary['metrics'] or epoch_summary['cbp_stats'] or epoch_summary['replacement_events']:
+                detailed_history.append(epoch_summary)
+
+        # Create the final summary structure
+        summary = {
+            'timestamp': timestamp,
+            'training_summary': training_summary,
+            'detailed_history': detailed_history
         }
 
         with open(history_path, 'w') as f:
-            json.dump(history, f, indent=2)
+            json.dump(summary, f, indent=2)
 
-        print(f"CBP history saved to {history_path}")
+        print(f"CBP training summary saved to {history_path}")
         return history_path
 
     def get_layer_replacement_count(self, layer_name: str) -> int:
@@ -372,8 +710,79 @@ class CBPLogger:
         """Get total replacements across all layers."""
         return self.total_replacements
 
+    def save_final_epoch_log(self):
+        """Save the final epoch's neuron-level data to a separate log file."""
+        if not hasattr(self, 'final_epoch_data') or not self.final_epoch_data:
+            print("No final epoch data to save")
+            return
+
+        final_log_path = self.log_dir / "final_epoch.log"
+
+        with open(final_log_path, 'w') as f:
+            f.write(f"Final Epoch Neuron-Level Data\n")
+            f.write(f"Epoch: {self.final_epoch_data['epoch']}\n")
+            f.write(f"Timestamp: {self.final_epoch_data['timestamp']}\n")
+            f.write("=" * 80 + "\n\n")
+
+            neuron_data = self.final_epoch_data.get('neuron_data', {})
+
+            # Write gradients for each layer
+            if neuron_data.get('gradients'):
+                f.write("GRADIENTS:\n")
+                f.write("-" * 40 + "\n")
+                for layer_name, grad_snapshots in neuron_data['gradients'].items():
+                    f.write(f"\nLayer: {layer_name}\n")
+                    if grad_snapshots:
+                        # Use the last batch's data
+                        last_snapshot = grad_snapshots[-1]
+                        f.write(f"  Batch: {last_snapshot['batch']}\n")
+                        f.write(f"  Values: {last_snapshot['values']}\n")
+                f.write("\n")
+
+            # Write utilities for each layer
+            if neuron_data.get('utilities'):
+                f.write("UTILITIES:\n")
+                f.write("-" * 40 + "\n")
+                for layer_name, util_snapshots in neuron_data['utilities'].items():
+                    f.write(f"\nLayer: {layer_name}\n")
+                    if util_snapshots:
+                        # Use the last batch's data
+                        last_snapshot = util_snapshots[-1]
+                        f.write(f"  Batch: {last_snapshot['batch']}\n")
+                        f.write(f"  Values: {last_snapshot['values']}\n")
+                f.write("\n")
+
+            # Write activations for each layer
+            if neuron_data.get('activations'):
+                f.write("ACTIVATIONS:\n")
+                f.write("-" * 40 + "\n")
+                for layer_name, act_snapshots in neuron_data['activations'].items():
+                    f.write(f"\nLayer: {layer_name}\n")
+                    if act_snapshots:
+                        # Use the last batch's data
+                        last_snapshot = act_snapshots[-1]
+                        f.write(f"  Batch: {last_snapshot['batch']}\n")
+                        f.write(f"  Values: {last_snapshot['values']}\n")
+                f.write("\n")
+
+            f.write("=" * 80 + "\n")
+            f.write("End of Final Epoch Data\n")
+
+        print(f"Final epoch log saved to {final_log_path}")
+
     def close(self):
         """Close the logger and save final statistics."""
         self.save_full_history()
+
+        # Save final epoch log
+        self.save_final_epoch_log()
+
+        # Close log file
+        if self.log_file:
+            self._write_to_log(f"\n\nTraining completed at {datetime.now().isoformat()}\n")
+            self._write_to_log("=" * 60 + "\n")
+            self.log_file.close()
+            print(f"CBP training log saved to {self.log_file_path}")
+
         if self.wandb:
             self.wandb.finish()

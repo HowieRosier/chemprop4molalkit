@@ -436,10 +436,12 @@ class TrainArgs(CommonArgs):
     """Utility type for neuron importance calculation (e.g., 'contribution', 'weight')."""
     cbp_init: str = 'kaiming'
     """Weight initialization method for new features in CBP."""
-    enable_gradient_logging: bool = False
+    enable_gradient_logging: bool = True
     """Enable gradient logging for CBP training analysis."""
     gradient_log_frequency: int = 1000000
     """How often to log gradients (every N batches). Default 1000000 means epoch-level logging only."""
+    accumulate: bool = True
+    """Whether to accumulate replacement counts over time in CBP."""
     optimizer: str = 'adam'
     """Optimizer to use (adam or sgd)."""
     

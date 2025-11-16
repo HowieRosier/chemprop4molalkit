@@ -1,0 +1,44 @@
+Metadata-Version: 2.1
+Name: chemprop4molalkit
+Version: 1.5.2
+Summary: Molecular Property Prediction with Message Passing Neural Networks - Enhanced with CBP for MolALKit integration
+Home-page: https://github.com/chemprop/chemprop
+Download-URL: https://github.com/chemprop/chemprop/v_1.5.2.tar.gz
+Author: Kyle Swanson, Kevin Yang, Wengong Jin, Lior Hirschfeld, Allison Tam (Modified for MolALKit integration)
+Author-email: chemprop@mit.edu
+License: MIT
+Project-URL: Documentation, https://chemprop.readthedocs.io/en/latest/
+Project-URL: Source, https://github.com/chemprop/chemprop
+Project-URL: PyPi, https://pypi.org/project/chemprop/
+Project-URL: Demo, http://chemprop.csail.mit.edu/
+Keywords: chemistry,machine learning,property prediction,message passing neural network,graph neural network
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+License-File: LICENSE.txt
+Requires-Dist: flask>=1.1.2
+Requires-Dist: hyperopt>=0.2.3
+Requires-Dist: matplotlib>=3.1.3
+Requires-Dist: numpy>=1.18.1
+Requires-Dist: pandas>=1.0.3
+Requires-Dist: pandas-flavor>=0.2.0
+Requires-Dist: scikit-learn>=0.22.2.post1
+Requires-Dist: scipy>=1.5.2
+Requires-Dist: sphinx>=3.1.2
+Requires-Dist: tensorboardX>=2.0
+Requires-Dist: torch>=1.5.2
+Requires-Dist: tqdm>=4.45.0
+Requires-Dist: typed-argument-parser>=1.6.1
+Provides-Extra: test
+Requires-Dist: pytest>=6.2.2; extra == "test"
+Requires-Dist: parameterized>=0.8.1; extra == "test"
+
+# Chemprop for MolALKit
+
+A customized version of Chemprop (v1.5.2) optimized for molecular active learning.
+
+It is utilized by package [MolALKit](https://github.com/RekerLab/MolALKit).

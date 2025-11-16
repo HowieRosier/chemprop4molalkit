@@ -6,7 +6,13 @@ from typing import Optional, Dict
 
 def log_gradients(m, grad_input, grad_output):
     """Backward hook to log gradient information."""
-    if not m.training or not hasattr(m, 'cbp_logger'):
+    if not m.training:
+        return
+
+    if not hasattr(m, 'cbp_logger'):
+        return
+
+    if m.cbp_logger is None:
         return
 
     # Only log gradients periodically to avoid overhead
@@ -17,6 +23,7 @@ def log_gradients(m, grad_input, grad_output):
 
     # Log every N batches (configurable)
     log_frequency = getattr(m, 'grad_log_frequency', 100)
+
     if m._grad_log_counter % log_frequency != 0:
         return
 
@@ -88,6 +95,17 @@ def log_features(m, i, o):
                     batch_idx=m._forward_log_counter,
                     epoch=getattr(m, 'current_epoch', 0)
                 )
+
+                # Also log activation values (output of this layer)
+                if o is not None:
+                    # o is the output of this CBPLinear layer
+                    activations = o.abs().mean(dim=0) if o.dim() > 1 else o.abs()
+                    m.cbp_logger.log_activations(
+                        layer_name=m.layer_name,
+                        activations=activations,
+                        batch_idx=m._forward_log_counter,
+                        epoch=getattr(m, 'current_epoch', 0)
+                    )
 
 
 def get_layer_bound(layer, init, gain):

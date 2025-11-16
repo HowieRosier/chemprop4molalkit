@@ -77,7 +77,12 @@ class MPNEncoder(nn.Module):
                 init=getattr(args, 'cbp_init', 'kaiming'),
                 act_type=getattr(args, 'activation', 'ReLU').lower(),
                 decay_rate=getattr(args, 'decay_rate', 0.99),
-                cbp_logger=None,  # Will be set by MoleculeModel if CBP logging is enabled
+                util_type=getattr(args, 'util_type', 'contribution'),
+                accumulate=getattr(args, 'accumulate', True),
+                layer_type='MPN',
+                layer_name='MPN_Layer1',
+                grad_log_frequency=getattr(args, 'gradient_log_frequency', 1000000),
+                cbp_logger=None,  # Will be set by ContinualBackpropTrainer
             )
             self.cbp_layer2 = CBPLinear(
                 in_layer=self.W_h,
@@ -88,7 +93,12 @@ class MPNEncoder(nn.Module):
                 init=getattr(args, 'cbp_init', 'kaiming'),
                 act_type=getattr(args, 'activation', 'ReLU').lower(),
                 decay_rate=getattr(args, 'decay_rate', 0.99),
-                cbp_logger=None,  # Will be set by MoleculeModel if CBP logging is enabled
+                util_type=getattr(args, 'util_type', 'contribution'),
+                accumulate=getattr(args, 'accumulate', True),
+                layer_type='MPN',
+                layer_name='MPN_Layer2',
+                grad_log_frequency=getattr(args, 'gradient_log_frequency', 1000000),
+                cbp_logger=None,  # Will be set by ContinualBackpropTrainer
             )
 
         # layer after concatenating the descriptors if args.atom_descriptors == descriptors
