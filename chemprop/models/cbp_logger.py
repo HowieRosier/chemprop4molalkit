@@ -138,9 +138,17 @@ class CBPLogger:
 
     def _write_to_log(self, message: str):
         """Write a message to the log file."""
-        if self.log_file:
+        if self.log_file and not self.log_file.closed:
             self.log_file.write(message)
             self.log_file.flush()
+        elif self.log_file and self.log_file.closed:
+            # Reopen the log file if it was closed
+            try:
+                self.log_file = open(self.log_file_path, 'a', buffering=1)  # Append mode
+                self.log_file.write(message)
+                self.log_file.flush()
+            except Exception as e:
+                print(f"Warning: Could not reopen log file {self.log_file_path}: {e}")
 
     def log_gradients(self,
                      layer_name: str,
@@ -281,8 +289,26 @@ class CBPLogger:
             self.epoch_replacements_by_layer[layer_name] = []
         self.epoch_replacements_by_layer[layer_name].extend(replaced_indices)
 
-        # Write to log file if replacements occurred
+        # Print real-time console output for replacements
         if len(replaced_indices) > 0:
+            # Determine layer type for display
+            if "FFN" in layer_name or "ffn" in layer_name.lower():
+                layer_type = "[FFN]"
+            elif "MPN" in layer_name or "mpn" in layer_name.lower():
+                layer_type = "[MPN]"
+            else:
+                layer_type = ""
+
+            # Format the indices list (show first 10 if too many)
+            if len(replaced_indices) > 10:
+                indices_str = str(replaced_indices[:10])[:-1] + ", ...]"
+            else:
+                indices_str = str(replaced_indices)
+
+            # Print the real-time replacement notification
+            print(f"🔥 Batch {batch_id} {layer_type}: {len(replaced_indices)} neurons replaced [{layer_name}:{indices_str}]")
+
+            # Also write to log file
             self._log_batch_replacement(batch_id, layer_name, replaced_indices, epoch_id)
 
         # Log to W&B
@@ -557,6 +583,15 @@ class CBPLogger:
             }
         }
 
+        # Calculate epoch-specific replacement count
+        epoch_replacement_count = 0
+        for layer_name, events in self.replacement_history.items():
+            epoch_events = [e for e in events if e['epoch'] == epoch]
+            epoch_replacement_count += sum(e['count'] for e in epoch_events)
+
+        # Print epoch summary to console
+        print(f"💡 CBP Epoch {epoch}: {epoch_replacement_count} neurons replaced total")
+
         # Append to all epochs data
         self.all_epochs_data.append(summary)
 
@@ -593,17 +628,37 @@ class CBPLogger:
             'activations': {}
         }
 
+    def mark_iteration_start(self, iteration: int):
+        """Mark the start of a new active learning iteration in the unified log.
+
+        Args:
+            iteration: The iteration number to mark
+
+        This creates a clear visual separator in the log file to show where
+        each active learning iteration begins.
+        """
+        # Write iteration separator to log file
+        if self.log_file:
+            separator = "\n" + "=" * 80 + "\n"
+            message = separator
+            message += f"ACTIVE LEARNING ITERATION {iteration} STARTING\n"
+            message += f"Timestamp: {datetime.now().isoformat()}\n"
+            message += separator + "\n"
+            self._write_to_log(message)
+
+        # Print to console for visibility
+        print(f"\n{'=' * 60}")
+        print(f"🔄 Starting Active Learning Iteration {iteration}")
+        print(f"{'=' * 60}\n")
+
     def save_full_history(self):
         """Save the complete CBP training summary to disk."""
-        # Generate timestamp for filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Save history at cbp_logs level
+        base_log_dir = self.log_dir
 
-        # Save history at cbp_logs root level with timestamp
-        if 'iter_' in str(self.log_dir):
-            # If we're in an iter subdirectory, go up one level
-            history_path = self.log_dir.parent / f"cbp_training_summary_{timestamp}.json"
-        else:
-            history_path = self.log_dir / f"cbp_training_summary_{timestamp}.json"
+        # Create summary file with timestamp (one per training session)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        history_path = base_log_dir / f"cbp_training_summary_{timestamp}.json"
 
         # Create training summary section
         training_summary = {
@@ -687,15 +742,16 @@ class CBPLogger:
             if epoch_summary['metrics'] or epoch_summary['cbp_stats'] or epoch_summary['replacement_events']:
                 detailed_history.append(epoch_summary)
 
-        # Create the final summary structure
-        summary = {
-            'timestamp': timestamp,
+        # Create complete summary (no longer iteration-specific)
+        complete_summary = {
+            'timestamp': datetime.now().isoformat(),
             'training_summary': training_summary,
             'detailed_history': detailed_history
         }
 
+        # Save the data
         with open(history_path, 'w') as f:
-            json.dump(summary, f, indent=2)
+            json.dump(complete_summary, f, indent=2)
 
         print(f"CBP training summary saved to {history_path}")
         return history_path
@@ -709,6 +765,16 @@ class CBPLogger:
     def get_total_replacements(self) -> int:
         """Get total replacements across all layers."""
         return self.total_replacements
+
+    def save_iteration_summary(self):
+        """Save iteration summary including final epoch data - called at end of each iteration."""
+        # Save the full history (creates cbp_training_summary_TIMESTAMP.json)
+        self.save_full_history()
+
+        # Also save the final epoch log
+        self.save_final_epoch_log()
+
+        print(f"📊 Iteration summary saved to {self.log_dir}")
 
     def save_final_epoch_log(self):
         """Save the final epoch's neuron-level data to a separate log file."""
@@ -770,12 +836,15 @@ class CBPLogger:
 
         print(f"Final epoch log saved to {final_log_path}")
 
+
     def close(self):
         """Close the logger and save final statistics."""
         self.save_full_history()
 
         # Save final epoch log
         self.save_final_epoch_log()
+
+        # No need for separate master log since we're using a single log file
 
         # Close log file
         if self.log_file:

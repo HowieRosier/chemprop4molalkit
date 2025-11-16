@@ -156,7 +156,7 @@ class ContinualBackpropTrainer:
                 # wasn't available when the CBPLinear layer was initialized
                 # Remove any existing gradient hooks first to avoid duplicates
                 if hasattr(cbp_layer, '_backward_hooks'):
-                    # Create a list of hook ids to remove (can't modify dict during iteration)
+                    # Create a list of hook ids to remove
                     hooks_to_remove = []
                     for hook_id, hook in cbp_layer._backward_hooks.items():
                         if hook.__name__ == 'log_gradients':
@@ -405,9 +405,6 @@ class ContinualBackpropTrainer:
             # Save epoch summary after logging stats
             self.cbp_logger.save_epoch_summary(epoch)
 
-            # Print summary for debugging
-            print(f"📊 Epoch {epoch} CBP Stats - Replacements: {total_replacements}, "
-                  f"Avg Age: {avg_age:.2f}, Mature: {mature_count}/{total_neurons}")
         elif self.cbp_logger:
             # Still save summary even if no CBP layers
             self.cbp_logger.save_epoch_summary(epoch)
@@ -415,6 +412,6 @@ class ContinualBackpropTrainer:
     def save_cbp_summary(self):
         """Save CBP training summary and close logger."""
         if self.cbp_logger:
-            self.cbp_logger.save_full_history()
+            # Note: close() will call save_full_history() internally
             self.cbp_logger.close()
             print("📊 CBP history and gradients saved successfully")
