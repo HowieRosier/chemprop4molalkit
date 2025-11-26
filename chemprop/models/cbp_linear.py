@@ -71,7 +71,7 @@ def log_features(m, i, o):
 
         m.util.data += (1 - m.decay_rate) * new_util
 
-        # Log to CBP logger if available (in forward hook for reliability)
+        # Log activations to CBP logger (gradients are logged separately via backward hook)
         if hasattr(m, 'cbp_logger') and m.cbp_logger is not None:
             # Update batch counter
             if not hasattr(m, '_forward_log_counter'):
@@ -81,24 +81,8 @@ def log_features(m, i, o):
             # Log periodically based on frequency
             log_freq = getattr(m, 'grad_log_frequency', 1000000)
             if m._forward_log_counter % log_freq == 0:
-                # Get gradient magnitude if available (from last backward pass)
-                grad_magnitude = torch.zeros_like(m.util)
-                if hasattr(m.out_layer.weight, 'grad') and m.out_layer.weight.grad is not None:
-                    grad_magnitude = m.out_layer.weight.grad.abs().mean(dim=0)
-
-                # Log all data
-                m.cbp_logger.log_gradients(
-                    layer_name=m.layer_name,
-                    gradients=grad_magnitude,
-                    utilities=m.util,
-                    ages=m.ages,
-                    batch_idx=m._forward_log_counter,
-                    epoch=getattr(m, 'current_epoch', 0)
-                )
-
-                # Also log activation values (output of this layer)
+                # Log activation values (output of this layer)
                 if o is not None:
-                    # o is the output of this CBPLinear layer
                     activations = o.abs().mean(dim=0) if o.dim() > 1 else o.abs()
                     m.cbp_logger.log_activations(
                         layer_name=m.layer_name,
@@ -169,9 +153,8 @@ class CBPLinear(nn.Module):
             self.register_full_backward_hook(call_reinit)
             self.register_forward_hook(log_features)
 
-        # Register gradient logging hook if CBP logger is provided
-        if cbp_logger is not None:
-            self.register_full_backward_hook(log_gradients)
+        # Note: gradient logging hook is registered by ContinualBackpropTrainer._setup_cbp_logging()
+        # to avoid duplicate registration and ensure unified logging control
 
         self.in_layer = in_layer
         self.add_in_dim = add_in_dim
