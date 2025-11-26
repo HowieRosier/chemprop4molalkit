@@ -563,6 +563,13 @@ class CBPLogger:
 
     def save_epoch_summary(self, epoch: int):
         """Save complete neuron-level data for the epoch."""
+        # Helper to get the LAST matching value (most recent, for current iteration)
+        def get_last_match(stats_list, epoch_val):
+            for s in reversed(stats_list):
+                if s['epoch'] == epoch_val:
+                    return s['value']
+            return None
+
         # Prepare the complete epoch data
         summary = {
             'epoch': epoch,
@@ -570,10 +577,10 @@ class CBPLogger:
             'total_replacements': self.total_replacements,
             'layers_tracked': list(self.current_epoch_data['gradients'].keys()),
             'cbp_stats': {
-                'replacement_count': next((s['value'] for s in self.cbp_stats['replacement_count_per_epoch'] if s['epoch'] == epoch), None),
-                'replacement_rate': next((s['value'] for s in self.cbp_stats['replacement_rate_per_epoch'] if s['epoch'] == epoch), None),
-                'avg_neuron_age': next((s['value'] for s in self.cbp_stats['avg_neuron_age_per_epoch'] if s['epoch'] == epoch), None),
-                'mature_neurons': next((s['value'] for s in self.cbp_stats['mature_neurons_per_epoch'] if s['epoch'] == epoch), None)
+                'replacement_count': get_last_match(self.cbp_stats['replacement_count_per_epoch'], epoch),
+                'replacement_rate': get_last_match(self.cbp_stats['replacement_rate_per_epoch'], epoch),
+                'avg_neuron_age': get_last_match(self.cbp_stats['avg_neuron_age_per_epoch'], epoch),
+                'mature_neurons': get_last_match(self.cbp_stats['mature_neurons_per_epoch'], epoch)
             },
             # Add the complete neuron-level data for this epoch
             'neuron_data': {
@@ -635,8 +642,18 @@ class CBPLogger:
             iteration: The iteration number to mark
 
         This creates a clear visual separator in the log file to show where
-        each active learning iteration begins.
+        each active learning iteration begins. Also resets per-iteration counters.
         """
+        # Reset per-iteration counters (keep cumulative data for full training history)
+        self.epoch_batch_count = 0
+        self.epoch_active_batches = 0
+        self.epoch_replacements_by_layer = {}
+        self.current_epoch_data = {
+            'gradients': {},
+            'utilities': {},
+            'activations': {}
+        }
+
         # Write iteration separator to log file
         if self.log_file:
             separator = "\n" + "=" * 80 + "\n"
@@ -756,25 +773,9 @@ class CBPLogger:
         print(f"CBP training summary saved to {history_path}")
         return history_path
 
-    def get_layer_replacement_count(self, layer_name: str) -> int:
-        """Get total replacement count for a specific layer."""
-        if layer_name not in self.replacement_history:
-            return 0
-        return sum(event['count'] for event in self.replacement_history[layer_name])
-
     def get_total_replacements(self) -> int:
         """Get total replacements across all layers."""
         return self.total_replacements
-
-    def save_iteration_summary(self):
-        """Save iteration summary including final epoch data - called at end of each iteration."""
-        # Save the full history (creates cbp_training_summary_TIMESTAMP.json)
-        self.save_full_history()
-
-        # Also save the final epoch log
-        self.save_final_epoch_log()
-
-        print(f"📊 Iteration summary saved to {self.log_dir}")
 
     def save_final_epoch_log(self):
         """Save the final epoch's neuron-level data to a separate log file."""
