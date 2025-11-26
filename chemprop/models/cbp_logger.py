@@ -840,19 +840,29 @@ class CBPLogger:
 
     def close(self):
         """Close the logger and save final statistics."""
-        self.save_full_history()
+        try:
+            self.save_full_history()
+        except Exception as e:
+            print(f"Warning: Failed to save full history: {e}")
 
-        # Save final epoch log
-        self.save_final_epoch_log()
+        try:
+            self.save_final_epoch_log()
+        except Exception as e:
+            print(f"Warning: Failed to save final epoch log: {e}")
 
-        # No need for separate master log since we're using a single log file
-
-        # Close log file
+        # Close log file (always executed)
         if self.log_file:
-            self._write_to_log(f"\n\nTraining completed at {datetime.now().isoformat()}\n")
-            self._write_to_log("=" * 60 + "\n")
-            self.log_file.close()
-            print(f"CBP training log saved to {self.log_file_path}")
+            try:
+                self._write_to_log(f"\n\nTraining completed at {datetime.now().isoformat()}\n")
+                self._write_to_log("=" * 60 + "\n")
+            except Exception:
+                pass  # Ignore write errors during close
+            finally:
+                self.log_file.close()
+                print(f"CBP training log saved to {self.log_file_path}")
 
         if self.wandb:
-            self.wandb.finish()
+            try:
+                self.wandb.finish()
+            except Exception as e:
+                print(f"Warning: Failed to close wandb: {e}")

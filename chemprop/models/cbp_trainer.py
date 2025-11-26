@@ -19,6 +19,16 @@ from torch.optim import SGD
 from chemprop.models.model import MoleculeModel
 from chemprop.models.AdamGnT import AdamGnT
 from chemprop.args import TrainArgs
+from chemprop.train.loss_functions import (
+    mcc_class_loss,
+    mcc_multiclass_loss,
+    dirichlet_class_loss,
+    dirichlet_multiclass_loss,
+    evidential_loss,
+    bounded_mse_loss,
+    sid_loss,
+    wasserstein_loss,
+)
 from .cbp_logger import CBPLogger
 
 
@@ -219,7 +229,7 @@ class ContinualBackpropTrainer:
                 if args.loss_function == 'binary_cross_entropy':
                     loss_func = nn.BCEWithLogitsLoss(reduction='none')
                 elif args.loss_function == 'mcc':
-                    loss_func = mcc_loss_func
+                    loss_func = mcc_class_loss
                 elif args.loss_function == 'dirichlet':
                     loss_func = dirichlet_class_loss
                 else:
@@ -237,7 +247,7 @@ class ContinualBackpropTrainer:
                 if args.loss_function == 'cross_entropy':
                     loss_func = nn.CrossEntropyLoss(reduction='none')
                 elif args.loss_function == 'mcc':
-                    loss_func = mcc_multiclass_loss_func
+                    loss_func = mcc_multiclass_loss
                 elif args.loss_function == 'dirichlet':
                     loss_func = dirichlet_multiclass_loss
                 else:
@@ -249,12 +259,8 @@ class ContinualBackpropTrainer:
                     loss_func = wasserstein_loss
                 else:
                     raise ValueError(f'Loss function {args.loss_function} not supported for {args.dataset_type} dataset type')
-            # Default to appropriate loss for simple cases
-            elif args.dataset_type == 'classification':
-                loss_func = nn.BCEWithLogitsLoss(reduction='none')
-            elif args.dataset_type == 'multiclass':
-                loss_func = nn.CrossEntropyLoss(reduction='none')
             else:
+                # Unsupported dataset type - use MSE as default
                 loss_func = nn.MSELoss(reduction='none')
         self.model.train()
 
