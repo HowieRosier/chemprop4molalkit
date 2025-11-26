@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from math import sqrt
-from typing import Optional, Dict
 
 
 def log_gradients(m, grad_input, grad_output):
