@@ -1,40 +1,10 @@
-"""
-AdamGnT: AdamW variant with per-element step counters for Generate-and-Test
-============================================================================
-This optimizer combines:
-1. AdamW's decoupled weight decay (more suitable for adaptive optimizers)
-2. Per-parameter element step counters (better for neuron replacement in CBP)
-
-Key features:
-- Weight decay is applied directly to parameters, not to gradients
-- Each parameter element has its own step counter
-- New neurons (after replacement) start with step=0 for larger initial learning rate
-"""
+"""AdamGnT: AdamW variant with per-element step counters for CBP neuron replacement."""
 
 import torch
 from torch.optim.optimizer import Optimizer
 
 
 class AdamGnT(Optimizer):
-    r"""Implements AdamW algorithm with per-element step counters for generate-and-test.
-
-    Combines AdamW's decoupled weight decay with per-element step counters,
-    making it ideal for continual learning with neuron replacement (CBP).
-
-    Arguments:
-        params (iterable): iterable of parameters to optimize or dicts defining
-            parameter groups
-        lr (float, optional): learning rate (default: 1e-3)
-        betas (Tuple[float, float], optional): coefficients used for computing
-            running averages of gradient and its square (default: (0.9, 0.999))
-        eps (float, optional): term added to the denominator to improve
-            numerical stability (default: 1e-8)
-        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
-        amsgrad (boolean, optional): whether to use the AMSGrad variant of this
-            algorithm from the paper `On the Convergence of Adam and Beyond`_
-            (default: False)
-    """
-
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
                  weight_decay=0, amsgrad=False):
         if not 0.0 <= lr:
@@ -55,12 +25,6 @@ class AdamGnT(Optimizer):
             group.setdefault('amsgrad', False)
 
     def step(self, closure=None):
-        """Performs a single optimization step.
-
-        Arguments:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
-        """
         loss = None
         if closure is not None:
             loss = closure()
@@ -76,16 +40,12 @@ class AdamGnT(Optimizer):
 
                 state = self.state[p]
 
-                # State initialization
+                # State init: per-element step counters (unlike standard Adam's scalar step)
                 if len(state) == 0:
-                    # =% Key modification: per-parameter element step counters
                     state['step'] = torch.zeros_like(p.data)
-                    # Exponential moving average of gradient values
                     state['exp_avg'] = torch.zeros_like(p.data)
-                    # Exponential moving average of squared gradient values
                     state['exp_avg_sq'] = torch.zeros_like(p.data)
                     if amsgrad:
-                        # Maintains max of all exp. moving avg. of sq. grad. values
                         state['max_exp_avg_sq'] = torch.zeros_like(p.data)
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
@@ -95,33 +55,23 @@ class AdamGnT(Optimizer):
 
                 state['step'] += 1
 
-                # Note: Removed L2 regularization from gradient
-                # Weight decay will be applied directly to parameters (AdamW style)
-
-                # Decay the first and second moment running average coefficient
+                # Update first and second moment estimates
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
                 if amsgrad:
-                    # Maintains the maximum of all 2nd moment running avg. till now
                     torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
-                    # Use the max. for normalizing running avg. of gradient
                     denom = max_exp_avg_sq.sqrt().add_(group['eps'])
                 else:
                     denom = exp_avg_sq.sqrt().add_(group['eps'])
 
-                # =% Fix AdamGnT implementation - use correct Adam formula
+                # Per-element bias correction (tensor ops since step is per-element)
                 bias_correction1 = 1 - beta1 ** state['step']
                 bias_correction2 = 1 - beta2 ** state['step']
-
-                # Calculate bias-corrected step size (per-element)
                 step_size = group['lr'] * (bias_correction2.sqrt() / bias_correction1)
 
-                # Standard Adam parameter update: p = p - step_size * exp_avg / denom
-                # Since step_size is now a tensor, we need to use element-wise operations
                 p.data.add_(-(step_size * exp_avg / denom))
 
-                # Apply decoupled weight decay (AdamW style)
-                # This is applied after the gradient update, directly to parameters
+                # Decoupled weight decay (AdamW style)
                 if group['weight_decay'] != 0:
                     p.data.mul_(1 - group['lr'] * group['weight_decay'])
 
